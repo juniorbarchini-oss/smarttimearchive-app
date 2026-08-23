@@ -344,32 +344,29 @@ class MainWindow(QMainWindow):
         progress_row.addWidget(self.btn_cancel)
         bottom_layout.addLayout(progress_row)
         
-        # Shared Status Label and Toggle Log Button
+        # Shared Status Label
         status_row = QHBoxLayout()
         self.progress_label = QLabel("Status: Ready (Please scan source backup first)")
         self.progress_label.setStyleSheet("font-size: 11px;")
         
+        # Keep instantiated for internal code dependencies, but omit from layouts
         self.btn_toggle_log = QPushButton("📄 Show Execution Log")
         self.btn_toggle_log.setStyleSheet("font-size: 10px; min-width: 140px;")
         self.btn_toggle_log.clicked.connect(self.toggle_log_console)
         
         status_row.addWidget(self.progress_label)
         status_row.addStretch()
-        status_row.addWidget(self.btn_toggle_log)
         bottom_layout.addLayout(status_row)
         
         main_layout.addWidget(bottom_frame)
 
-        # 5. Collapsible Execution Log (Hidden by default)
+        # 5. Collapsible Execution Log (Instantiated but omitted from layout)
         self.log_group = QGroupBox("Execution Log Details")
         log_layout = QVBoxLayout(self.log_group)
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setStyleSheet("font-family: monospace; font-size: 11px;")
         log_layout.addWidget(self.log_text)
-        
-        main_layout.addWidget(self.log_group, 1)
-        self.log_group.setVisible(False) # Hidden by default!
 
         # 6. Native macOS Menu Bar
         self.create_menu_bar()
@@ -517,6 +514,19 @@ class MainWindow(QMainWindow):
     def scan_home_finished(self, home_folders):
         self.folders_list.clear()
         
+        # Detect missing Full Disk Access permissions (TCC restriction)
+        if len(home_folders) == 0 and self.dates_list.count() > 0:
+            QMessageBox.warning(self, "Permissions Required",
+                "<h3>Full Disk Access Required</h3>"
+                "<p>SmartTimeArchive detected your backup snapshots but was blocked from reading files inside them.</p>"
+                "<p>Please grant <b>Full Disk Access</b> in macOS System Settings:</p>"
+                "<ol>"
+                "<li>Open <b>System Settings ➔ Privacy & Security ➔ Full Disk Access</b>.</li>"
+                "<li>Click the <b>+</b> button and select <b>SmartTimeArchive.app</b> (or your Terminal if running as script).</li>"
+                "<li>Enable the checkbox/switch and restart the application.</li>"
+                "</ol>"
+            )
+
         # Predefined list of standard folder checks
         prechecked_folders = ["Desktop", "Documents", "Projects", "obsidian", "Bitacoras", "NMS_DATA"]
         
@@ -604,7 +614,10 @@ class MainWindow(QMainWindow):
             "*/.aspnet/*",
             "*/.agentmemory/*",
             "*/.antigravity-ide/*",
-            "*/.antigravitycli/*"
+            "*/.antigravitycli/*",
+            "*$RECYCLE.BIN*",
+            "*$Recycle.Bin*",
+            "*System Volume Information*"
         ]
         
         # Add unchecked dates to exclusions dynamically

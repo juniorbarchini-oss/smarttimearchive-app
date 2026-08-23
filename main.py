@@ -196,6 +196,9 @@ DARK_STYLESHEET = """
         width: 10px;
         margin: 0.5px;
     }
+    QDialog, QMessageBox {
+        background-color: #1E272C;
+    }
 """
 
 def main():

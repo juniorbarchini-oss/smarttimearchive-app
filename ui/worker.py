@@ -3,7 +3,7 @@ from engine import ArchiveEngine, migrate_archive, compress_archive_to_tar
 
 class EstimateWorker(QThread):
     progress_sig = Signal(int, int, str)  # folder_idx, total_folders, folder_name
-    finished_sig = Signal(int, int, int)  # total_size, file_count, folder_count
+    finished_sig = Signal(float, int, int)  # total_size (float to prevent overflow), file_count, folder_count
     error_sig = Signal(str)
 
     def __init__(self, source_dir, exclusions, target_user, included_folders=None):
@@ -37,7 +37,7 @@ class EstimateWorker(QThread):
                 progress_callback=progress_callback,
                 cancel_check=cancel_check
             )
-            self.finished_sig.emit(total_size, file_count, folder_count)
+            self.finished_sig.emit(float(total_size), file_count, folder_count)
         except Exception as e:
             self.error_sig.emit(str(e))
 
