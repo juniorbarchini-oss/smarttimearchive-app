@@ -1,0 +1,20 @@
+# Python configuration
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.spec
+
+# macOS configuration
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# Temporary mount points
+/tmp/smarttimearchive_mounts*
