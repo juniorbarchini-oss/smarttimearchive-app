@@ -84,6 +84,24 @@ class TestTui(unittest.IsolatedAsyncioTestCase):
             msg = str(app.screen.query_one("#message").render())
             self.assertIn("Connect the USB disk", msg)
 
+    async def test_slow_discovery_shows_a_counter_and_then_the_disks(self):
+        import time
+
+        def slow():
+            time.sleep(1.6)
+            return fake_found()
+
+        app = tui.StaApp(discover=slow, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(1.2)
+            self.assertIn(
+                "Looking for backup disks", str(app.screen.query_one("#message").render())
+            )
+            self.assertEqual(app.screen.query_one(OptionList).option_count, 0)
+            await pilot.pause(1.2)
+            self.assertEqual(app.screen.query_one(OptionList).option_count, 2)
+            self.assertNotIn("Looking", str(app.screen.query_one("#message").render()))
+
     async def test_r_rescans(self):
         calls = []
         app = tui.StaApp(discover=lambda: calls.append(1) or fake_found(), skip_welcome=True)

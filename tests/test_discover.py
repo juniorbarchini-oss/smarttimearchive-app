@@ -74,6 +74,43 @@ class TestBackupVolumes(unittest.TestCase):
         for name in ("Locked USB", "Unmounted", "Net image", "Empty backup"):
             self.assertFalse(self.by[name].supported)
 
+    def test_a_disk_that_does_not_answer_is_reported_not_fatal(self):
+        info = {**INFO, "disk7s2": {"_failed": True}}
+        vols = discover.find_backup_volumes(APFS_LIST, info=lambda d: info[d], snapshots=fake_snaps)
+        by = {v.name: v for v in vols}
+        self.assertIn("not answering", by["Good USB"].note)
+        self.assertFalse(by["Good USB"].supported)
+        self.assertEqual(len(vols), 5, "the other disks are still listed")
+
+    def test_disks_are_inspected_in_parallel_and_order_is_kept(self):
+        import threading
+        import time
+
+        seen = set()
+
+        def slow_info(dev):
+            seen.add(threading.current_thread().name)
+            time.sleep(0.3)
+            return INFO[dev]
+
+        t0 = time.time()
+        vols = discover.find_backup_volumes(APFS_LIST, info=slow_info, snapshots=fake_snaps)
+        self.assertLess(time.time() - t0, 1.0, "5 x 0.3s in series would be 1.5s")
+        self.assertEqual(
+            [v.device for v in vols], ["disk7s2", "disk8s1", "disk9s1", "disk5s1", "disk10s1"]
+        )
+
+    def test_command_timeout_returns_none(self):
+        import subprocess
+
+        real = subprocess.run
+        subprocess.run = lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("x", 1))
+        try:
+            self.assertIsNone(discover._plist(["diskutil", "list"], timeout=1))
+            self.assertEqual(discover._volume_info("disk1"), {"_failed": True})
+        finally:
+            subprocess.run = real
+
     def test_no_backups_at_all(self):
         self.assertEqual(discover.find_backup_volumes({"Containers": []}), [])
 

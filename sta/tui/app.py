@@ -1,5 +1,7 @@
 """SmartTimeArchive terminal UI: a linear wizard on top of the engine."""
 
+import time
+
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
@@ -107,14 +109,29 @@ class SourceScreen(Screen):
         self.action_rescan()
 
     def action_rescan(self):
-        self.query_one("#message", Static).update("Looking for backup disks...")
+        self._t0 = time.time()
+        self._looking = True
+        self._tick()
+        self._timer = self.set_interval(1, self._tick)
         self.run_worker(self._discover, thread=True, exclusive=True)
+
+    def _tick(self):
+        if self._looking:
+            secs = int(time.time() - self._t0)
+            text = f"Looking for backup disks... {secs}s"
+            if secs >= 4:
+                text += (
+                    "\n(a disk that is asleep or busy with a Time Machine copy can take a while)"
+                )
+            self.query_one("#message", Static).update(text)
 
     def _discover(self):
         found = self.app.discover()
         self.app.call_from_thread(self._show, *found)
 
     def _show(self, volumes, legacy):
+        self._looking = False
+        self._timer.stop()
         ol = self.query_one("#volumes", OptionList)
         ol.clear_options()
         volumes = sorted(volumes, key=lambda v: not v.supported)  # usable disks first
@@ -146,7 +163,7 @@ class SourceScreen(Screen):
             t.append(f"\n  {v.bus} - {fmt_bytes(v.used_bytes)} used - {len(v.snapshots)} snapshots")
             t.append(f" - {first} to {last}", style="#66ff99")
         else:
-            t.append(f"\n  not available: {v.note}", style="#ffb000")
+            t.append(f"\n  can't be used: {v.note}", style="#ffb000")
         return t
 
     def on_option_list_option_selected(self, event):

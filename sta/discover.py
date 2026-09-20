@@ -7,6 +7,7 @@ are still returned, with a `note` saying why, so the UI can explain instead of h
 import os
 import plistlib
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .apfs import ApfsError, list_snapshots
@@ -40,8 +41,12 @@ class Destination:
     is_backup_source: bool = False
 
 
-def _plist(cmd):
-    r = subprocess.run(cmd, capture_output=True)
+def _plist(cmd, timeout=20):
+    """Plist output of a command, or None if it failed or did not answer in time."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
     if r.returncode != 0 or not r.stdout:
         return None
     try:
@@ -51,44 +56,58 @@ def _plist(cmd):
 
 
 def _volume_info(device):
-    return _plist(["diskutil", "info", "-plist", device]) or {}
+    """diskutil info for a volume; {"_failed": True} when it did not answer (busy or asleep)."""
+    return _plist(["diskutil", "info", "-plist", device]) or {"_failed": True}
+
+
+def _inspect(vol, info, snapshots):
+    dev = vol["DeviceIdentifier"]
+    i = info(dev)
+    bv = BackupVolume(
+        name=vol.get("Name") or i.get("VolumeName", dev),
+        device=dev,
+        mountpoint=i.get("MountPoint", ""),
+        bus=i.get("BusProtocol", ""),
+        used_bytes=int(vol.get("CapacityInUse", 0)),
+    )
+    if i.get("_failed"):
+        bv.note = "not answering (busy or asleep?): press r to try again"
+    elif vol.get("Locked"):
+        bv.note = "encrypted and locked: unlock it in Finder first"
+    elif not bv.mountpoint:
+        bv.note = "not mounted"
+    elif bv.bus == "Disk Image":
+        bv.note = "Time Machine on a network image: it cannot be a source (to move it, copy its .sparsebundle)"
+    else:
+        try:
+            bv.snapshots = [d for d, _, _ in snapshots(bv.mountpoint)]
+        except ApfsError as e:
+            bv.note = f"cannot read snapshots: {e}"
+        else:
+            if bv.snapshots:
+                bv.supported = True
+            else:
+                bv.note = "no Time Machine snapshots found"
+    return bv
 
 
 def find_backup_volumes(apfs_list=None, info=_volume_info, snapshots=list_snapshots):
-    """APFS volumes with the Backup role: local USB disks are usable sources."""
+    """APFS volumes with the Backup role: local USB disks are usable sources.
+
+    Each volume is inspected in parallel with its own time limit, so one slow disk (asleep,
+    or busy with a Time Machine copy) does not hold back the rest.
+    """
     data = apfs_list if apfs_list is not None else _plist(["diskutil", "apfs", "list", "-plist"])
-    out = []
-    for container in (data or {}).get("Containers", []):
-        for vol in container.get("Volumes", []):
-            if "Backup" not in vol.get("Roles", []):
-                continue
-            dev = vol["DeviceIdentifier"]
-            i = info(dev)
-            bv = BackupVolume(
-                name=vol.get("Name") or i.get("VolumeName", dev),
-                device=dev,
-                mountpoint=i.get("MountPoint", ""),
-                bus=i.get("BusProtocol", ""),
-                used_bytes=int(vol.get("CapacityInUse", 0)),
-            )
-            if vol.get("Locked"):
-                bv.note = "encrypted and locked: unlock it in Finder first"
-            elif not bv.mountpoint:
-                bv.note = "not mounted"
-            elif bv.bus == "Disk Image":
-                bv.note = "network image: not a supported source (copy the .sparsebundle instead)"
-            else:
-                try:
-                    bv.snapshots = [d for d, _, _ in snapshots(bv.mountpoint)]
-                except ApfsError as e:
-                    bv.note = f"cannot read snapshots: {e}"
-                else:
-                    if bv.snapshots:
-                        bv.supported = True
-                    else:
-                        bv.note = "no Time Machine snapshots found"
-            out.append(bv)
-    return out
+    candidates = [
+        vol
+        for container in (data or {}).get("Containers", [])
+        for vol in container.get("Volumes", [])
+        if "Backup" in vol.get("Roles", [])
+    ]
+    if not candidates:
+        return []
+    with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
+        return list(pool.map(lambda v: _inspect(v, info, snapshots), candidates))
 
 
 def find_legacy_backups(volumes_dir="/Volumes", is_mount=os.path.ismount):

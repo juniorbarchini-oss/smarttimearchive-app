@@ -16,8 +16,11 @@ class ApfsError(RuntimeError):
     pass
 
 
-def _plist(cmd):
-    r = subprocess.run(cmd, capture_output=True)
+def _plist(cmd, timeout=30):
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ApfsError(f"{' '.join(cmd[:3])} did not answer in {timeout}s (disk busy or asleep?)")
     if r.returncode != 0:
         raise ApfsError(f"{' '.join(cmd)} failed: {r.stderr.decode(errors='replace').strip()}")
     return plistlib.loads(r.stdout)
