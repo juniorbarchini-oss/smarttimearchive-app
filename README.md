@@ -1,118 +1,199 @@
-# SmartTimeArchive 📂⏱️
+# SmartTimeArchive
 
-[![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/)
-[![PySide6](https://img.shields.io/badge/framework-PySide6%20%2F%20Qt6-green.svg)](https://pypi.org/project/PySide6/)
-[![macOS Compatible](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](https://apple.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+Archive the **history of a Time Machine (APFS) backup disk** into plain, dated folders on another
+USB disk or a network unit, without multiplying the space the history takes. **Your Time Machine
+disk is never touched**: this only makes a copy.
 
-**SmartTimeArchive** is a premium, lightweight, and native-feeling macOS desktop utility designed to scan, rescue, and consolidate user profiles from damaged, legacy, or network Time Machine backups. 
+Apple gives no way to copy an APFS Time Machine backup from a USB disk to another one: each backup is
+a hidden snapshot and only Time Machine knows how to move them. Its advice is "keep the old disk in a
+drawer and start over". This tool covers the two situations where that hurts:
 
-By leveraging native macOS APIs, APFS snapshotting, and directory-level hard link analysis, it successfully pulls back your data without duplicating physical storage space, resolving the extreme latencies of bad sectors or network lags.
-
----
-
-## ☕ Support the Project (Buy Me a Coffee)
-
-If this tool saved your precious files, rescued a damaged USB drive, or preserved your deduplicated network backups, consider showing some love!
-
-[![Ko-fi Support](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/hbarchini)
-
----
-
-## 🌟 Key Features
-
-*   **⚡ Smart Hard Link Deduplication (APFS Native):** Keeps files linked across chronological snapshots, exactly like Apple's Time Machine. Copying 10 days of backup snapshots won't multiply your disk usage!
-*   **🔌 Sparsebundle Network Mounting:** Automatically attaches, mounts, and cleans up remote `.sparsebundle` files (e.g. from ZimaOS, Synology, or SMB shares) directly within the UI.
-*   **🎛️ Selective Rescues:** Choose exactly which directories (`Desktop`, `Documents`, `Pictures`, etc.) and which specific backup dates you want to extract.
-*   **🚀 Zero Terminal Dependency (Touch ID / Admin Self-Elevation):** Launches with native macOS security prompts. Just double-click the `.app` bundle, authenticate with Touch ID, and run the tool as an administrator natively.
-*   **🌗 Premium Dark Mode Interface:** Permanent slate-gray, high-contrast dark theme designed to match macOS Sonoma/Sequoia vibes perfectly.
-*   **📦 Compilations & Tarballs:** Choose between extracting as reference folders or compressing everything into a single `.tar.gz` archive with full hard-link preservation.
-*   **📊 Live Progress Dashboard:** Real-time stats on files processed, physical data written, active directory paths, and error counters for damaged storage sectors.
-
----
-
-## 🛠️ How it Works under the Hood
+1. **The backup disk is filling up.** Time Machine will start overwriting the oldest backups. Archive
+   the N oldest ones now; Time Machine carries on exactly as before.
+2. **The backup disk is old and you fear it will die.** Archive everything, reuse the old disk for
+   something else, and start Time Machine from zero on a new disk. Nothing is lost.
 
 ```
-[Time Machine Backup]
-   ├── Local APFS Snapshot Volume
-   └── Remote Network .sparsebundle
-         │
-         ▼ (Auto-mounts via hdiutil & mount_apfs)
-   [SmartTimeArchive GUI] ◄─── (User Selects Folders & Dates)
-         │
-         ▼ (Calculates st_ino inodes in memory)
-   [Deduplicated Copy Engine]
-         ├── If new file: copy bytes
-         └── If duplicate: link physically via os.link
-         │
-         ▼
-   [Target SSD APFS Directory]
+<destination>/
+├── 2026-08-23-203105/Users/<you>/Documents/...
+├── 2026-09-18-194541/Users/<you>/Documents/...
+└── _sta/                        manifests (sha256 per date) + extraction reports
 ```
 
----
+Files that did not change between two backups are **hard links** to the same data, exactly like
+Time Machine itself does, so 12 snapshots that would take 671 GB as separate copies took 184 GB.
+It is an archive, not a Time Machine replacement: to restore an old file, Time Machine does that
+already; this keeps the history safe when the disk can no longer hold it.
 
-## 📦 How to Compile and Bundle Nativity
+## Install
 
-If you want to compile and build the standalone macOS `.app` yourself:
+**From the source** (no security warning from macOS: nothing is downloaded through a browser):
 
-1.  **Clone the Repository:**
-    ```bash
-    git clone https://github.com/hbarchini/smarttimearchive-app.git
-    cd smarttimearchive-app
-    ```
-
-2.  **Create and Activate Virtual Environment:**
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    ```
-
-3.  **Install Dependencies:**
-    ```bash
-    pip install PySide6 pyinstaller
-    ```
-
-4.  **Bundle into a Native App:**
-    Use PyInstaller to compile it with its high-res icon:
-    ```bash
-    pyinstaller --windowed --noconfirm --clean --icon=app_icon.icns --name="SmartTimeArchive" main.py
-    ```
-
-The compiled `SmartTimeArchive.app` bundle will be ready in the `dist/` directory!
-
----
-
-## 🚀 Running the App
-
-### Script Mode
 ```bash
-sudo venv/bin/python main.py
+git clone https://github.com/juniorbarchini-oss/smarttimearchive-app.git
+cd smarttimearchive-app && ./install.sh
 ```
 
-### Standalone App Bundle (.app)
-1. Go to the `dist/` folder in Finder.
-2. Double-click `SmartTimeArchive.app`.
-3. Authenticate with Touch ID or enter your user password when prompted.
-4. Scan and start rescuing your data!
+It asks for your administrator password once. It installs:
 
----
+| what | where |
+|---|---|
+| the engine and its own Python environment | `/usr/local/lib/smarttimearchive` (owned by root) |
+| the `sta` command | `/usr/local/bin/sta` |
+| the app (opens Terminal at the right size) | `/Applications/SmartTimeArchive.app` |
 
-## 📁 Repository Structure
+The engine runs as administrator, so its code lives where only an administrator can change it.
+To remove everything: `/usr/local/lib/smarttimearchive/uninstall.sh` (it asks before deleting the
+scan cache and never touches your archives).
 
-*   `main.py`: Entry point, stylesheet configuration, and admin elevation check.
-*   `engine.py`: Core backup parser, APFS snapshot mounter, and deduplicated copy engine.
-*   `ui/main_window.py`: PySide6 window layout, dynamic checklists, and stats widgets.
-*   `ui/worker.py`: Background worker threads for non-blocking UI scans and copies.
-*   `app_icon.icns`: High-resolution Sonoma-style application icon.
+## Use
 
----
+- **App:** double-click *SmartTimeArchive* in Applications or Launchpad.
+- **Terminal:** `sta` opens the UI; `sta --tmux` runs it inside `tmux` so a long copy survives a
+  closed window (if `tmux` is missing it says so and runs without it).
+- **Engine commands:** `sta plan | extract | verify | list ...` (see below).
+- **Scan cache:** the scan of each backup is kept in `~/Library/Caches/sta` so the next run is
+  fast (it can reach several GB for a large history). Press `d` on the first screen or the final
+  one to delete it (it asks first), or use `sta cache` to see its size and `sta cache --clear` to
+  delete it. It is only a speed-up: deleting it never affects your archives.
 
-## 📝 License
+A guided, retro-green wizard: source, backups, destination, administrator password, scan, copy,
+report (with an optional verification). It runs as your user and uses `sudo` only for the engine.
+You choose everything: nothing is preselected and nothing starts without your yes. A copy can be
+cancelled at any moment; each copy into an APFS disk image creates a new image.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Source disks are detected automatically: only local USB disks with Time Machine snapshots are
+offered, and the others are listed with the reason they cannot be used.
 
----
+## Requirements
 
-## 🏷️ Tags
-`backup` | `time-machine` | `apfs` | `snapshot` | `deduplication` | `hard-links` | `sparsebundle` | `recovery` | `macOS` | `pyside6` | `pyinstaller` | `gui`
+- **macOS 11 (Big Sur) or newer**, Intel or Apple silicon. Time Machine saves APFS backups, the only
+  kind this tool reads, since macOS 11.
+- The APFS Time Machine backup disk (a local USB disk) mounted, and an administrator password.
+- **Python 3.9 or newer** for the installer. macOS 13+ gets one with `xcode-select --install`; on
+  macOS 11-12 use Homebrew (`brew install python`) or python.org.
+- The engine itself uses only the standard library; the UI needs [Textual](https://textual.textualize.io)
+  (the installer fetches it once).
+
+## Usage (engine commands)
+
+The same engine works without the UI (after installing, `sta` is on your PATH):
+
+```bash
+# 1. which snapshots does the backup contain?
+sudo sta list "/Volumes/My Backup"
+
+# 2. how much space is needed? (read-only, nothing is copied)
+sudo sta plan "/Volumes/My Backup" /Volumes/Archive
+
+# 3. extract
+sudo sta extract "/Volumes/My Backup" /Volumes/Archive
+
+# 4. later: re-check the archive against its sha256 manifests (read-only; sudo also covers
+#    the permission-protected files). Works on a folder or on a SmartTimeArchive image.
+sudo sta verify /Volumes/Archive
+```
+
+| Option | Meaning |
+|---|---|
+| `--dates 2026-09-15,2026-09-18` | only snapshots whose name starts with any of these prefixes |
+| `--last N` | only the N most recent snapshots |
+| `--one-per-day` | keep only the last snapshot of each day |
+| `--users bob` / `--folders Documents,Desktop` | limit to users / top-level home folders (hidden files are included by default) |
+| `--exclude GLOB` | skip any path component matching the glob (repeatable, exact component, not substring) |
+| `--dest-image` | write into a **new** case-sensitive APFS disk image (`SmartTimeArchive_<date>-<time>.sparsebundle`) created inside the destination, sized at 90% of its free space (sparse: it only takes what is written). Keeps hard links on exFAT, NTFS or network shares. An existing image is never reused |
+| `--yes` | accept the "destination has no hard links" warning and store everything in full |
+| `--no-cache` | ignore the scan cache |
+| `--json` | machine-readable output, one JSON object per line (plan, progress, result); used by the terminal UI |
+
+`plan` and `extract` first read the **metadata of every file** in the selected snapshots. On an old
+disk this can take several minutes; the result is cached in `~/Library/Caches/sta/` (snapshots never
+change), so the extraction after a `plan` does not read it again. Copying is then limited by the disk:
+many small files are much slower than a few big ones (a real 184 GB / 2.4 M-entry extraction from a
+5400 rpm USB disk took about an hour).
+
+Exit codes (`extract` and `verify`): `0` ok, `3` ok with warnings (unreadable files), `130` cancelled, `1` failed.
+Ctrl+C cancels cleanly and never reports success.
+
+## Safety rules
+
+- The backup is mounted **read-only** and is never modified. Nothing is ever deleted from it.
+- Each date is written to `<date>.partial` and renamed only when finished, so an interrupted run is
+  visible as such. Writing into a folder, re-running skips finished dates and still links against them (every disk image is a new one, so a repeated copy into an image starts again).
+- Every source file is read **once**; read errors (`EIO`) are retried a couple of times, logged and the
+  run continues. The final report lists exactly which files could not be read.
+- A sha256 is stored per file in `_sta/manifests/` (computed on the copy, so the fragile source disk
+  is not read twice). Names containing `\`, newline or carriage return are escaped like GNU `sha256sum`.
+- Disk space is checked before copying. A destination without hard links (exFAT, NTFS, SMB share) is
+  refused unless you pass `--dest-image` (recommended) or `--yes`, and the plan shows the size with and without links.
+- Ownership, permissions, extended attributes, ACLs and timestamps are preserved (via `copyfile(3)`),
+  so some files stay unreadable for a normal user, as in the original.
+
+## Good to know
+
+- **If the disk fills up** the copy stops at once with a clear message; the finished dates are kept.
+- **Copying the archive later with Finder breaks the hard links** and multiplies its size. Move it with
+  `sudo ditto SRC DST` (checked: it keeps hard links, owners, modes, xattrs and symlinks; the only thing
+  it lost in a real test was the own timestamp of one symlink that carries a "deny writeattr" ACL) or
+  `rsync -aH`. Never copy it to an exFAT/NTFS/SMB destination directly: use `--dest-image`.
+- The disk image is created with `diskutil image` (macOS versions without it fall back to the deprecated
+  `hdiutil`). Its volume is **case-sensitive APFS**, like the Time Machine backup it comes from.
+- On a case-insensitive destination (the default for Mac system disks) two names that differ only in
+  case collide; the tool detects it and lists them in the report instead of overwriting.
+- Only the `Data/Users` part of each backup is extracted (your files and settings, not the sealed
+  system volume, not other volumes).
+
+## Tests
+
+```bash
+venv/bin/python -m unittest discover -s tests   # the UI tests need Textual and are skipped without it
+```
+
+The tests build fake "snapshots" with the same hard-link layout Time Machine leaves and check content
+per date, links, hidden files, symlinks, xattrs, timestamps, unreadable files, cancellation, resume,
+filters, the scan cache, the installer's ownership rules and the terminal UI (with a fake engine).
+
+## Scope
+
+**Source:** a Time Machine backup on a local USB disk (APFS). That is the case Apple gives no way out of.
+(A Time Machine backup on a network share is a `.sparsebundle` file: to just move it, copy that file.
+The engine can read one that is already attached, but it is not a supported source.)
+
+**Encrypted backup disks are not handled yet (planned for 2.1).** If your Time Machine disk is
+encrypted, unlock it in Finder first (macOS asks for the backup password when you connect it) and then
+open the tool. This is expected to work but **has not been tested**. If the password is lost, nothing can
+open that backup, with this tool or any other.
+
+**Destination:** another USB disk, or a network unit. Disks that cannot hold hard links (exFAT, NTFS,
+SMB shares) use a case-sensitive APFS disk image created inside them with `--dest-image`.
+
+## Roadmap
+
+- **2.0** — engine (CLI), terminal UI wizard, installer (`install.sh`), always-new adaptive disk images,
+  optional verification, scan-cache control. *This release.*
+- **2.1** — encrypted / locked backup disks handled inside the tool (detect, explain, and guide the
+  unlock instead of leaving it to Finder); `.pkg` installer; Homebrew tap.
+- **Ideas** — `sta copy` to move an already extracted archive; optional `.tar.gz` output that keeps the
+  hard links.
+
+The v1 desktop app (PySide6) was retired: it could delete the source after a migration that reported
+errors and reported success after a cancel. It remains in the git history only.
+
+## Development
+
+```bash
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+./smarttimearchive          # runs the UI from this folder (no install needed)
+```
+
+## Credits
+
+Created by **Humberto Barchini**, built together with **Claude** (Anthropic's AI model) using Claude Code:
+the design was discussed in chat, and the engine, tests and terminal UI were pair-programmed with it.
+The commit history carries the co-author credit.
+
+Not affiliated with or endorsed by Apple or Anthropic. Time Machine is a trademark of Apple Inc.
+
+## Support
+
+If this tool saved your history, consider [buying me a coffee](https://ko-fi.com/hbarchini).
