@@ -283,7 +283,7 @@ def _load_cached(conn, path, opts, needs_filter):
     return [tuple(e) for e in errors]
 
 
-def _scan_to_cache(snap, opts, cdir, log):
+def _scan_to_cache(snap, opts, cdir, log, emit):
     """Scans one snapshot into its own cache file (atomic rename). Returns the path."""
     final = _cache_file(cdir, snap, _opts_key(opts))
     tmp = final + ".tmp"
@@ -298,7 +298,11 @@ def _scan_to_cache(snap, opts, cdir, log):
             snap.date,
             root,
             opts,
-            progress=lambda n: log(f"    {n:,} entries, {time.time() - t0:,.0f}s"),
+            progress=lambda n: (
+                log(f"    {n:,} entries, {time.time() - t0:,.0f}s"),
+                emit({"event": "scan_progress", "date": snap.date, "entries": n,
+                      "seconds": round(time.time() - t0, 1)}),
+            ),  # fmt: skip
         )
     c.execute("INSERT INTO meta VALUES ('errors', ?)", (json.dumps(errors),))
     c.execute("INSERT INTO meta VALUES ('seconds', ?)", (str(time.time() - t0),))
@@ -309,7 +313,7 @@ def _scan_to_cache(snap, opts, cdir, log):
     return final
 
 
-def scan(source, dates, opts, db_path, log=print, use_cache=True, cdir=None):
+def scan(source, dates, opts, db_path, log=print, use_cache=True, cdir=None, emit=lambda ev: None):
     """Loads/creates the per-snapshot scans and merges them into one working db."""
     conn = _open_db(db_path)
     wanted = set(dates)
@@ -328,11 +332,23 @@ def scan(source, dates, opts, db_path, log=print, use_cache=True, cdir=None):
         if hit:
             scan_errors[snap.date] = _load_cached(conn, hit[0], opts, hit[1])
             log(f"[{i}/{len(snaps)}] {snap.date}: from cache")
+            emit(
+                {
+                    "event": "scan_snapshot",
+                    "i": i,
+                    "n": len(snaps),
+                    "date": snap.date,
+                    "cached": True,
+                }
+            )
             continue
         log(f"[{i}/{len(snaps)}] {snap.date}: scanning ...")
+        emit(
+            {"event": "scan_snapshot", "i": i, "n": len(snaps), "date": snap.date, "cached": False}
+        )
         t0 = time.time()
         if use_cache:
-            path = _scan_to_cache(snap, opts, cdir, log)
+            path = _scan_to_cache(snap, opts, cdir, log, emit)
             scan_errors[snap.date] = _load_cached(conn, path, opts, False)
         else:
             with snap.opener() as root:
@@ -342,6 +358,7 @@ def scan(source, dates, opts, db_path, log=print, use_cache=True, cdir=None):
         left = sum(1 for s in snaps[i:] if not (use_cache and _find_cache(cdir, s, opts)))
         if left:
             log(f"    took {time.time() - t0:,.0f}s; ~{spent / scanned * left / 60:,.1f} min left")
+            emit({"event": "scan_eta", "minutes_left": round(spent / scanned * left / 60, 1)})
     return conn, scan_errors
 
 
@@ -438,10 +455,19 @@ def _sha256(path):
 
 class Extractor:
     def __init__(
-        self, source, dest, conn, dates, log=print, cancel=lambda: False, case_insensitive=False
+        self,
+        source,
+        dest,
+        conn,
+        dates,
+        log=print,
+        cancel=lambda: False,
+        case_insensitive=False,
+        emit=lambda ev: None,
     ):
         self.source, self.dest, self.conn, self.dates = source, dest, conn, dates
         self.log, self.cancel, self.case_insensitive = log, cancel, case_insensitive
+        self.emit = emit
         self.report = {"dates": {}, "status": None, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
 
     def run(self):
@@ -454,10 +480,10 @@ class Extractor:
             _own(p)
         openers = {sn.date: sn.opener for sn in self.source.snapshots()}
         try:
-            for date in self.dates:
+            for i, date in enumerate(self.dates, 1):
                 if self.cancel():
                     break
-                self._extract_date(date, openers[date])
+                self._extract_date(date, openers[date], i)
         except Exception as e:  # unexpected: report, never claim success
             self.report["fatal"] = f"{type(e).__name__}: {e}"
             self.report["status"] = FAILED
@@ -475,7 +501,7 @@ class Extractor:
     def _date_root(self, date, current):
         return os.path.join(self.dest, date + ".partial" if date == current else date)
 
-    def _extract_date(self, date, opener):
+    def _extract_date(self, date, opener, i=1):
         final = os.path.join(self.dest, date)
         stats = {
             "copied": 0,
@@ -491,6 +517,7 @@ class Extractor:
         if os.path.isdir(final):
             stats["skipped"] = True
             self.log(f"{date}: already extracted, skipping")
+            self.emit({"event": "date_skipped", "date": date, "i": i, "n": len(self.dates)})
             self._load_done(date)
             return
         part = final + ".partial"
@@ -502,6 +529,8 @@ class Extractor:
         rows = self.conn.execute(
             "SELECT rel, kind, ino, size, mtime_ns FROM files WHERE snap=? ORDER BY rel", (date,)
         ).fetchall()
+        self.emit({"event": "extract_start", "date": date, "i": i, "n": len(self.dates),
+                   "entries": len(rows)})  # fmt: skip
         manifest, dirs, seen = [], [], set()
         with opener() as data_root:
             for n, (rel, kind, ino, size, mtime_ns) in enumerate(rows, 1):
@@ -535,6 +564,11 @@ class Extractor:
                 except OSError as e:
                     stats["errors"].append((rel, e.errno or 0, e.strerror or str(e)))
                     self.log(f"  ERROR {rel}: {e.strerror}")
+                if n % 2000 == 0:
+                    self.emit({"event": "extract_progress", "date": date, "done": n,
+                               "total": len(rows), "copied": stats["copied"],
+                               "linked": stats["linked"], "bytes_copied": stats["bytes_copied"],
+                               "errors": len(stats["errors"])})  # fmt: skip
                 if n % 5000 == 0:
                     self.log(f"  {date}: {n}/{len(rows)} entries")
             for src, dst in sorted(dirs, key=lambda t: -t[1].count(os.sep)):
@@ -550,6 +584,9 @@ class Extractor:
             f"{date}: done ({stats['copied']} copied, {stats['linked']} linked, "
             f"{len(stats['errors'])} errors)"
         )
+        self.emit({"event": "date_done", "date": date, "i": i, "n": len(self.dates),
+                   "copied": stats["copied"], "linked": stats["linked"],
+                   "bytes_copied": stats["bytes_copied"], "errors": len(stats["errors"])})  # fmt: skip
 
     def _file(self, date, rel, src, dst, ino, size, mtime_ns, stats):
         row = self.conn.execute(

@@ -1,13 +1,14 @@
 """Command line front-end:  sudo python3 -m sta <list|plan|extract> ..."""
 
 import argparse
+import json
 import os
 import shutil
 import signal
 import sys
 import tempfile
 
-from . import core, image
+from . import core, image, verify
 from .apfs import ApfsError, cleanup_stale_mounts
 
 
@@ -55,6 +56,11 @@ def _parser():
         )
         if dest:
             sp.add_argument(
+                "--json",
+                action="store_true",
+                help="machine-readable output: one JSON object per line (used by the TUI)",
+            )
+            sp.add_argument(
                 "--dest-image",
                 action="store_true",
                 help="write into a case-sensitive APFS disk image (SmartTimeArchive.sparsebundle) "
@@ -63,12 +69,45 @@ def _parser():
 
     common(sub.add_parser("list", help="list snapshots"), dest=False)
     common(sub.add_parser("plan", help="scan and show sizes / space check"), dest=True)
+    vp = sub.add_parser("verify", help="re-check an extracted archive against its checksums")
+    vp.add_argument(
+        "archive", help="archive folder, .sparsebundle image, or a folder containing one"
+    )
     ex = sub.add_parser("extract", help="extract snapshots to dated folders")
     common(ex, dest=True)
     ex.add_argument(
         "--yes", action="store_true", help="accept warnings (e.g. no hard-link support)"
     )
     return p
+
+
+def _verify(args):
+    cancelled = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: cancelled.append(1))
+    try:
+        rep = verify.verify_archive(
+            args.archive,
+            emit=lambda ev: print(
+                f"  {ev['done']:,}/{ev['total']:,} entries, {ev['seconds']:.0f}s"
+            ),
+            cancel=lambda: bool(cancelled),
+        )
+    except ApfsError as e:
+        sys.exit(f"error: {e}")
+    print(
+        f"Dates: {rep['dates']}   entries: {rep['entries']:,}   files re-hashed: {rep['hashed']:,}\n"
+        f"Checksum mismatches: {len(rep['mismatches'])}   missing: {len(rep['missing'])}   "
+        f"not readable by this user: {len(rep['unreadable'])}   without checksum: {rep['no_checksum']}"
+    )
+    for label in ("mismatches", "missing"):
+        for date, rel in rep[label][:10]:
+            print(f"  {label.upper()}: {date}/{rel}")
+    if rep["unreadable"]:
+        print("(run with sudo to check the permission-protected files too)")
+    print(f"\nStatus: {rep['status']}")
+    codes = {verify.VERIFIED: 0, verify.VERIFIED_WITH_WARNINGS: 3, verify.CANCELLED: 130}
+    return codes.get(rep["status"], 1)
 
 
 def _csv(v):
@@ -103,7 +142,10 @@ def _plan_text(plan):
 
 def main(argv=None):
     args = _parser().parse_args(argv)
-    sys.stdout.reconfigure(line_buffering=True)  # progress must show up through pipes/tee
+    if hasattr(sys.stdout, "reconfigure"):  # progress must show up through pipes/tee
+        sys.stdout.reconfigure(line_buffering=True)
+    if args.cmd == "verify":
+        return _verify(args)
     if args.source_type == "apfs" and os.geteuid() != 0:
         sys.exit("Mounting snapshots needs root: run with sudo.")
     if args.source_type == "apfs":
@@ -128,44 +170,77 @@ def main(argv=None):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _extract(source, dest, conn, dates, plan, cancelled):
+class Out:
+    """Human text by default; with --json, one JSON object per line and no prose."""
+
+    def __init__(self, as_json):
+        self.json = as_json
+
+    def say(self, text=""):
+        if not self.json:
+            print(text)
+
+    def event(self, ev):
+        if self.json:
+            print(json.dumps(ev, default=str))
+
+    def fail(self, message, code=2):
+        if self.json:
+            self.event({"event": "error", "message": message})
+            return code
+        sys.exit(message)
+
+
+def _extract(source, dest, conn, dates, plan, cancelled, out):
     ext = core.Extractor(
         source,
         dest,
         conn,
         dates,
+        log=lambda *a: out.say(" ".join(map(str, a))),
         cancel=lambda: bool(cancelled),
         case_insensitive=plan["dest_case_insensitive"],
+        emit=out.event,
     )
     return ext.run(), ext.report
 
 
 def _run(args, source, dates, opts, work):
+    out = Out(args.json)
     use_cache = args.source_type == "apfs" and not args.no_cache
     pending = core.uncached_dates(source, dates, opts) if use_cache else dates
     if pending:
-        print(
+        out.say(
             f"NOTE: {len(pending)} of {len(dates)} snapshots must be scanned. This reads the metadata "
             "of every file and can take\nseveral minutes per snapshot on an old or slow disk. "
             "It happens once: results are cached."
         )
+    out.event({"event": "scan_needed", "pending": len(pending), "total": len(dates)})
     conn, scan_errors = core.scan(
-        source, dates, opts, os.path.join(work, "scan.db"), use_cache=use_cache
+        source,
+        dates,
+        opts,
+        os.path.join(work, "scan.db"),
+        use_cache=use_cache,
+        log=lambda *a: out.say(" ".join(map(str, a))),
+        emit=out.event,
     )
     plan = core.make_plan(conn, args.dest, via_image=args.dest_image)
-    print(_plan_text(plan))
+    out.say(_plan_text(plan))
+    out.event({"event": "plan", **plan})
     n_err = sum(len(v) for v in scan_errors.values())
     if n_err:
-        print(
+        out.say(
             f"WARNING: {n_err} entries could not be read during the scan (see report after extract)"
         )
+        out.event({"event": "scan_errors", "count": n_err})
     if args.cmd == "plan":
         return 0 if plan["fits"] else 2
 
     if not plan["fits"]:
-        sys.exit("Not enough free space on the destination. Nothing was copied.")
+        return out.fail("Not enough free space on the destination. Nothing was copied.")
     if not plan["dest_hardlinks"] and not args.yes:
-        sys.exit(
+        return out.fail(
             "Destination does not support hard links: every snapshot would be stored in full "
             f"({_gb(plan['bytes_without_links'])} instead of {_gb(plan['bytes_with_links'])}).\n"
             "Re-run with --dest-image to write into an APFS disk image on it (recommended), "
@@ -178,17 +253,20 @@ def _run(args, source, dates, opts, work):
     if args.dest_image:
         img = os.path.join(args.dest, image.IMAGE_NAME)
         size = image.image_size_for(plan["bytes_needed_with_margin"])
-        print(f"Using disk image {img} (max {_gb(size)}, grows as needed)")
+        out.say(f"Using disk image {img} (max {_gb(size)}, grows as needed)")
+        out.event({"event": "image", "path": img, "max_bytes": size})
         with image.ImageMount(img, size) as im:
-            status, report = _extract(source, im.mountpoint, conn, dates, plan, cancelled)
+            status, report = _extract(source, im.mountpoint, conn, dates, plan, cancelled, out)
         if report.get("report_file"):  # the mount point is gone after detaching
             report["report_file"] = report["report_file"].replace(im.mountpoint, img + " (inside)")
         if im.detached is False:
-            print(f'WARNING: could not detach the image; run: hdiutil detach "{im.mountpoint}"')
-        print(f"Archive is inside {img} (double-click it to open)")
+            out.say(f'WARNING: could not detach the image; run: diskutil eject "{im.mountpoint}"')
+            out.event({"event": "warning", "message": "image not detached", "mount": im.mountpoint})
+        out.say(f"Archive is inside {img} (double-click it to open)")
     else:
-        status, report = _extract(source, args.dest, conn, dates, plan, cancelled)
-    print(f"\nStatus: {status}\nReport: {report.get('report_file')}")
+        status, report = _extract(source, args.dest, conn, dates, plan, cancelled, out)
+    out.say(f"\nStatus: {status}\nReport: {report.get('report_file')}")
+    out.event({"event": "finished", "status": status, "report_file": report.get("report_file")})
     return {core.COMPLETED: 0, core.COMPLETED_WITH_ERRORS: 3, core.CANCELLED: 130}.get(status, 1)
 
 

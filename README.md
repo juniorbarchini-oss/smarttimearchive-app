@@ -41,6 +41,10 @@ sudo python3 -m sta plan "/Volumes/My Backup" /Volumes/Archive
 
 # 3. extract
 sudo python3 -m sta extract "/Volumes/My Backup" /Volumes/Archive
+
+# 4. later: re-check the archive against its sha256 manifests (read-only; sudo also covers
+#    the permission-protected files). Works on a folder or on a SmartTimeArchive image.
+sudo python3 -m sta verify /Volumes/Archive
 ```
 
 | Option | Meaning |
@@ -53,6 +57,7 @@ sudo python3 -m sta extract "/Volumes/My Backup" /Volumes/Archive
 | `--dest-image` | write into a case-sensitive APFS disk image (`SmartTimeArchive.sparsebundle`) created inside the destination: keeps hard links on exFAT, NTFS or network shares |
 | `--yes` | accept the "destination has no hard links" warning and store everything in full |
 | `--no-cache` | ignore the scan cache |
+| `--json` | machine-readable output, one JSON object per line (plan, progress, result); used by the terminal UI |
 
 `plan` and `extract` first read the **metadata of every file** in the selected snapshots. On an old
 disk this can take several minutes; the result is cached in `~/Library/Caches/sta/` (snapshots never
@@ -60,7 +65,7 @@ change), so the extraction after a `plan` does not read it again. Copying is the
 many small files are much slower than a few big ones (a real 184 GB / 2.4 M-entry extraction from a
 5400 rpm USB disk took about an hour).
 
-Exit codes: `0` completed, `3` completed with unreadable files, `130` cancelled, `1` failed.
+Exit codes (`extract` and `verify`): `0` ok, `3` ok with warnings (unreadable files), `130` cancelled, `1` failed.
 Ctrl+C cancels cleanly and never reports success.
 
 ## Safety rules
