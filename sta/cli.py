@@ -8,7 +8,7 @@ import signal
 import sys
 import tempfile
 
-from . import core, image, verify
+from . import CREDIT, __version__, core, image, verify
 from .apfs import ApfsError, cleanup_stale_mounts
 
 
@@ -19,6 +19,9 @@ def _gb(n):
 def _parser():
     p = argparse.ArgumentParser(
         prog="sta", description="Extract Time Machine (APFS) history to dated folders."
+    )
+    p.add_argument(
+        "--version", action="version", version=f"SmartTimeArchive {__version__}\n{CREDIT}"
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 

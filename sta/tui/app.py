@@ -3,11 +3,11 @@
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Footer, OptionList, Static
 from textual.widgets.option_list import Option
 
-from .. import discover
+from .. import AUTHOR, DISCLAIMER, REPO, SUPPORT, __version__, discover
 from . import art
 
 STEPS = ["Source", "Contents", "Destination", "Scan", "Run", "Report"]
@@ -51,6 +51,7 @@ class WelcomeScreen(Screen):
             yield Static("", id="tagline")
             yield Static("", id="subline")
             yield Static("", id="hint")
+            yield Static(f"by {AUTHOR}  -  built with Claude", id="credits")
 
     def on_mount(self):
         width = self.app.size.width
@@ -89,6 +90,7 @@ class WelcomeScreen(Screen):
 class SourceScreen(Screen):
     BINDINGS = [
         ("r", "rescan", "Rescan disks"),
+        ("a", "about", "About"),
         ("question_mark", "help", "Help"),
         ("q", "app.quit", "Quit"),
     ]
@@ -153,12 +155,33 @@ class SourceScreen(Screen):
             self.app.source = volume
             self.app.push_screen(ContentsScreen())
 
+    def action_about(self):
+        self.app.push_screen(AboutScreen())
+
     def action_help(self):
         self.notify(
             "Up/Down move, Enter selects, r rescans the disks, q quits.\n"
             "Only local USB disks with Time Machine snapshots can be a source.",
             title="Help",
         )
+
+
+class AboutScreen(ModalScreen):
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("a", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="about-box"):
+            yield Static(f"SmartTimeArchive  {__version__}", id="about-title")
+            yield Static(
+                f"\nCreated by {AUTHOR}\n"
+                "Built together with Claude (Anthropic), using Claude Code\n\n"
+                f"{REPO}\nSupport the project: {SUPPORT}\n\n"
+                f"{DISCLAIMER}\n\n[Esc] close"
+            )
 
 
 class ContentsScreen(Screen):

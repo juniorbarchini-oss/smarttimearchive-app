@@ -86,3 +86,29 @@ WelcomeScreen {
     width: 100%;
     text-align: center;
 }
+
+#credits {
+    margin-top: 1;
+    color: #145c2b;
+    width: 100%;
+    text-align: center;
+}
+
+AboutScreen {
+    align: center middle;
+    background: #050a06 80%;
+}
+
+#about-box {
+    width: 74;
+    height: auto;
+    padding: 1 3;
+    border: double #33ff66;
+    background: #0a140c;
+    color: #33ff66;
+}
+
+#about-title {
+    text-style: bold;
+    color: #eaffea;
+}

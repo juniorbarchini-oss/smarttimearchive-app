@@ -93,6 +93,25 @@ class TestTui(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.5)
             self.assertEqual(len(calls), 2)
 
+    async def test_about_screen_credits_author_and_claude(self):
+        app = tui.StaApp(discover=fake_found, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.4)
+            await pilot.press("a")
+            await pilot.pause(0.3)
+            self.assertIsInstance(app.screen, tui.AboutScreen)
+            text = " ".join(str(w.render()) for w in app.screen.query("Static"))
+            for needle in ("Humberto Barchini", "Claude", "Not affiliated"):
+                self.assertIn(needle, text)
+            await pilot.press("escape")
+            await pilot.pause(0.3)
+            self.assertIsInstance(app.screen, tui.SourceScreen)
+
+    async def test_welcome_shows_the_credit_line(self):
+        app = tui.StaApp(discover=fake_found)
+        async with app.run_test(size=(120, 40)):
+            self.assertIn("Claude", str(app.screen.query_one("#credits").render()))
+
     def test_helpers(self):
         self.assertEqual(tui.fmt_bytes(281_700_000_000), "281.7 GB")
         self.assertEqual(tui.fmt_bytes(512), "512 B")

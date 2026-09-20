@@ -139,6 +139,14 @@ SMB shares) use a case-sensitive APFS disk image created inside them with `--des
 replaces them and should not be used on data you care about: v1 can delete the source after a migration
 that reported errors, and reports success after a cancel.
 
+## Credits
+
+Created by **Humberto Barchini**, built together with **Claude** (Anthropic's AI model) using Claude Code:
+the design was discussed in chat, and the engine, tests and terminal UI were pair-programmed with it.
+The commit history carries the co-author credit.
+
+Not affiliated with or endorsed by Apple or Anthropic. Time Machine is a trademark of Apple Inc.
+
 ## Support
 
 If this tool saved your history, consider [buying me a coffee](https://ko-fi.com/hbarchini).
