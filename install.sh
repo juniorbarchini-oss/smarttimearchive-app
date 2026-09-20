@@ -51,6 +51,10 @@ say "Using Python $version ($py)"
 
 say "Administrator access is needed once to install the engine where only an administrator"
 say "can change it."
+if [ -n "$SUDO" ] && ! sudo -n true 2>/dev/null; then
+  [ -t 0 ] || die "this needs a real Terminal window to ask for your password.
+Open the Terminal app, go to the project folder and run ./install.sh there."
+fi
 [ -z "$SUDO" ] || sudo -v
 
 # --- the engine ------------------------------------------------------------------------
