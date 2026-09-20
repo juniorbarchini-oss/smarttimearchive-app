@@ -1,118 +1,111 @@
-# SmartTimeArchive 📂⏱️
+# SmartTimeArchive
 
-[![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/)
-[![PySide6](https://img.shields.io/badge/framework-PySide6%20%2F%20Qt6-green.svg)](https://pypi.org/project/PySide6/)
-[![macOS Compatible](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](https://apple.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+Extract the **history of a Time Machine (APFS) backup** into plain, dated folders you can browse
+and search with Finder — on another disk, or inside a disk image on a network share — without
+multiplying the space the history takes.
 
-**SmartTimeArchive** is a premium, lightweight, and native-feeling macOS desktop utility designed to scan, rescue, and consolidate user profiles from damaged, legacy, or network Time Machine backups. 
-
-By leveraging native macOS APIs, APFS snapshotting, and directory-level hard link analysis, it successfully pulls back your data without duplicating physical storage space, resolving the extreme latencies of bad sectors or network lags.
-
----
-
-## ☕ Support the Project (Buy Me a Coffee)
-
-If this tool saved your precious files, rescued a damaged USB drive, or preserved your deduplicated network backups, consider showing some love!
-
-[![Ko-fi Support](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/hbarchini)
-
----
-
-## 🌟 Key Features
-
-*   **⚡ Smart Hard Link Deduplication (APFS Native):** Keeps files linked across chronological snapshots, exactly like Apple's Time Machine. Copying 10 days of backup snapshots won't multiply your disk usage!
-*   **🔌 Sparsebundle Network Mounting:** Automatically attaches, mounts, and cleans up remote `.sparsebundle` files (e.g. from ZimaOS, Synology, or SMB shares) directly within the UI.
-*   **🎛️ Selective Rescues:** Choose exactly which directories (`Desktop`, `Documents`, `Pictures`, etc.) and which specific backup dates you want to extract.
-*   **🚀 Zero Terminal Dependency (Touch ID / Admin Self-Elevation):** Launches with native macOS security prompts. Just double-click the `.app` bundle, authenticate with Touch ID, and run the tool as an administrator natively.
-*   **🌗 Premium Dark Mode Interface:** Permanent slate-gray, high-contrast dark theme designed to match macOS Sonoma/Sequoia vibes perfectly.
-*   **📦 Compilations & Tarballs:** Choose between extracting as reference folders or compressing everything into a single `.tar.gz` archive with full hard-link preservation.
-*   **📊 Live Progress Dashboard:** Real-time stats on files processed, physical data written, active directory paths, and error counters for damaged storage sectors.
-
----
-
-## 🛠️ How it Works under the Hood
+Apple does not let you copy an APFS Time Machine backup to another disk: each backup is a hidden
+snapshot and only Time Machine knows how to move them. If your backup disk is old or full, the usual
+advice is "keep it as an archive and start over". SmartTimeArchive turns that history into ordinary
+folders instead:
 
 ```
-[Time Machine Backup]
-   ├── Local APFS Snapshot Volume
-   └── Remote Network .sparsebundle
-         │
-         ▼ (Auto-mounts via hdiutil & mount_apfs)
-   [SmartTimeArchive GUI] ◄─── (User Selects Folders & Dates)
-         │
-         ▼ (Calculates st_ino inodes in memory)
-   [Deduplicated Copy Engine]
-         ├── If new file: copy bytes
-         └── If duplicate: link physically via os.link
-         │
-         ▼
-   [Target SSD APFS Directory]
+<destination>/
+├── 2026-08-23-203105/Users/<you>/Documents/...
+├── 2026-09-18-194541/Users/<you>/Documents/...
+└── _sta/                        manifests (sha256 per date) + extraction reports
 ```
 
----
+Files that did not change between two backups are **hard links** to the same data, exactly like
+Time Machine itself does, so 12 snapshots that would take 671 GB as separate copies took 184 GB.
+It is an archive, not a Time Machine replacement: you open a folder and find what you deleted
+years ago.
 
-## 📦 How to Compile and Bundle Nativity
+> **Status:** the v2 engine (command line) is working and tested against a real 12-snapshot
+> backup. A terminal UI and network-share support are next (see [Roadmap](#roadmap)).
 
-If you want to compile and build the standalone macOS `.app` yourself:
+## Requirements
 
-1.  **Clone the Repository:**
-    ```bash
-    git clone https://github.com/hbarchini/smarttimearchive-app.git
-    cd smarttimearchive-app
-    ```
+- macOS with an APFS Time Machine backup disk mounted (a network `.sparsebundle` is on the roadmap).
+- Python 3.9+ — standard library only.
+- `sudo`: mounting snapshots needs root. Everything the tool writes is handed back to your user.
 
-2.  **Create and Activate Virtual Environment:**
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    ```
+## Usage
 
-3.  **Install Dependencies:**
-    ```bash
-    pip install PySide6 pyinstaller
-    ```
-
-4.  **Bundle into a Native App:**
-    Use PyInstaller to compile it with its high-res icon:
-    ```bash
-    pyinstaller --windowed --noconfirm --clean --icon=app_icon.icns --name="SmartTimeArchive" main.py
-    ```
-
-The compiled `SmartTimeArchive.app` bundle will be ready in the `dist/` directory!
-
----
-
-## 🚀 Running the App
-
-### Script Mode
 ```bash
-sudo venv/bin/python main.py
+# 1. which snapshots does the backup contain?
+sudo python3 -m sta list "/Volumes/My Backup"
+
+# 2. how much space is needed? (read-only, nothing is copied)
+sudo python3 -m sta plan "/Volumes/My Backup" /Volumes/Archive
+
+# 3. extract
+sudo python3 -m sta extract "/Volumes/My Backup" /Volumes/Archive
 ```
 
-### Standalone App Bundle (.app)
-1. Go to the `dist/` folder in Finder.
-2. Double-click `SmartTimeArchive.app`.
-3. Authenticate with Touch ID or enter your user password when prompted.
-4. Scan and start rescuing your data!
+| Option | Meaning |
+|---|---|
+| `--dates 2026-09-15,2026-09-18` | only snapshots whose name starts with any of these prefixes |
+| `--last N` | only the N most recent snapshots |
+| `--one-per-day` | keep only the last snapshot of each day |
+| `--users bob` / `--folders Documents,Desktop` | limit to users / top-level home folders (hidden files are included by default) |
+| `--exclude GLOB` | skip any path component matching the glob (repeatable, exact component, not substring) |
+| `--yes` | accept the "destination has no hard links" warning |
+| `--no-cache` | ignore the scan cache |
 
----
+`plan` and `extract` first read the **metadata of every file** in the selected snapshots. On an old
+disk this can take several minutes; the result is cached in `~/Library/Caches/sta/` (snapshots never
+change), so the extraction after a `plan` does not read it again. Copying is then limited by the disk:
+many small files are much slower than a few big ones (a real 184 GB / 2.4 M-entry extraction from a
+5400 rpm USB disk took about an hour).
 
-## 📁 Repository Structure
+Exit codes: `0` completed, `3` completed with unreadable files, `130` cancelled, `1` failed.
+Ctrl+C cancels cleanly and never reports success.
 
-*   `main.py`: Entry point, stylesheet configuration, and admin elevation check.
-*   `engine.py`: Core backup parser, APFS snapshot mounter, and deduplicated copy engine.
-*   `ui/main_window.py`: PySide6 window layout, dynamic checklists, and stats widgets.
-*   `ui/worker.py`: Background worker threads for non-blocking UI scans and copies.
-*   `app_icon.icns`: High-resolution Sonoma-style application icon.
+## Safety rules
 
----
+- The backup is mounted **read-only** and is never modified. Nothing is ever deleted from it.
+- Each date is written to `<date>.partial` and renamed only when finished, so an interrupted run is
+  visible as such. Re-running skips finished dates and still links against them.
+- Every source file is read **once**; read errors (`EIO`) are retried a couple of times, logged and the
+  run continues. The final report lists exactly which files could not be read.
+- A sha256 is stored per file in `_sta/manifests/` (computed on the copy, so the fragile source disk
+  is not read twice). Names containing `\`, newline or carriage return are escaped like GNU `sha256sum`.
+- Disk space is checked before copying. A destination without hard links (exFAT, NTFS, SMB share) is
+  refused unless you pass `--yes`, and the plan shows the size with and without links.
+- Ownership, permissions, extended attributes, ACLs and timestamps are preserved (via `copyfile(3)`),
+  so some files stay unreadable for a normal user, as in the original.
 
-## 📝 License
+## Good to know
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- **Copying the archive later with Finder breaks the hard links** and multiplies its size. Move it with
+  `rsync -aH` or `ditto`.
+- On a case-insensitive destination (the default for Mac system disks) two names that differ only in
+  case collide; the tool detects it and lists them in the report instead of overwriting.
+- Only the `Data/Users` part of each backup is extracted (your files and settings, not the sealed
+  system volume, not other volumes).
 
----
+## Tests
 
-## 🏷️ Tags
-`backup` | `time-machine` | `apfs` | `snapshot` | `deduplication` | `hard-links` | `sparsebundle` | `recovery` | `macOS` | `pyside6` | `pyinstaller` | `gui`
+```bash
+python3 -m unittest discover -s tests
+```
+
+The tests build fake "snapshots" with the same hard-link layout Time Machine leaves and check content
+per date, links, hidden files, symlinks, xattrs, timestamps, unreadable files, cancellation, resume,
+filters and the scan cache.
+
+## Roadmap
+
+1. **Engine (CLI)** — done.
+2. `.sparsebundle` as source (Time Machine on a NAS) and as destination (image created on a network share).
+3. Terminal UI wizard: pick source → contents → destination → confirm → run → report.
+4. Optional `.tar.gz` output that keeps the hard links.
+
+`main.py`, `engine.py` and `ui/` are the **v1 desktop app** (PySide6). They are kept until the terminal UI
+replaces them and should not be used on data you care about: v1 can delete the source after a migration
+that reported errors, and reports success after a cancel.
+
+## Support
+
+If this tool saved your history, consider [buying me a coffee](https://ko-fi.com/hbarchini).
