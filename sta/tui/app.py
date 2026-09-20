@@ -6,13 +6,14 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Footer, OptionList, Static
+from textual.widgets import Footer, Input, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
+from textual.widgets.selection_list import Selection
 
 from .. import AUTHOR, DISCLAIMER, REPO, SUPPORT, __version__, discover
 from . import art
 
-STEPS = ["Source", "Contents", "Destination", "Scan", "Run", "Report"]
+STEPS = ["Source", "Backups", "Destination", "Scan", "Run", "Report"]
 
 
 def fmt_bytes(n):
@@ -170,7 +171,7 @@ class SourceScreen(Screen):
         volume = self.volumes.get(event.option_id)
         if volume and volume.supported:
             self.app.source = volume
-            self.app.push_screen(ContentsScreen())
+            self.app.push_screen(BackupsScreen())
 
     def action_about(self):
         self.app.push_screen(AboutScreen())
@@ -201,16 +202,124 @@ class AboutScreen(ModalScreen):
             )
 
 
-class ContentsScreen(Screen):
-    """Step 2 (placeholder until the next iteration)."""
+def nice_date(name):
+    """'2026-09-18-194541' -> '2026-09-18  19:45:41'"""
+    return f"{name[:10]}  {name[11:13]}:{name[13:15]}:{name[15:17]}"
+
+
+class OldestDialog(ModalScreen):
+    """Asks how many of the oldest backups to pick."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, total, default):
+        super().__init__()
+        self.total, self.default = total, default
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static("How many of the oldest backups?", id="dialog-title")
+            yield Input(value=str(self.default), type="integer", id="oldest-n")
+            yield Static(f"1 to {self.total}  -  Enter applies, Esc cancels", classes="dim")
+
+    def on_mount(self):
+        self.query_one("#oldest-n", Input).focus()
+
+    def on_input_submitted(self, event):
+        try:
+            n = int(event.value)
+        except ValueError:
+            n = 0
+        if 1 <= n <= self.total:
+            self.dismiss(n)
+        else:
+            self.notify(f"Type a number from 1 to {self.total}.", severity="warning")
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
+class BackupsScreen(Screen):
+    """Step 2: which backups (dated folders) to archive. What is inside them is not touched."""
+
+    BINDINGS = [
+        ("a", "all", "All (retire this disk)"),
+        ("o", "oldest", "Oldest N (make room)"),
+        ("n", "none", "None"),
+        ("c", "continue", "Continue"),
+        ("escape", "app.pop_screen", "Back"),
+        ("q", "app.quit", "Quit"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        src = self.app.source
+        yield StepBar(2)
+        yield Static(f"Which backups do you want to archive from {src.name}?", classes="heading")
+        yield Static(
+            "Your Time Machine disk is not touched: this only makes a copy.\n"
+            "Disk filling up?  Press o and take the oldest ones before Time Machine overwrites them.\n"
+            "Disk getting old? Press a and take everything.  Space bar checks or unchecks one.",
+            classes="dim",
+        )
+        yield SelectionList(*[Selection(nice_date(d), d, True) for d in src.snapshots], id="dates")
+        yield Static("", id="summary", classes="note")
+        yield Footer()
+
+    def on_mount(self):
+        self.query_one("#dates", SelectionList).focus()
+        self._summary()
+
+    def on_selection_list_selected_changed(self, event):
+        self._summary()
+
+    @property
+    def dates(self):
+        return self.query_one("#dates", SelectionList)
+
+    def _summary(self):
+        chosen = sorted(self.dates.selected)
+        total = len(self.app.source.snapshots)
+        if chosen:
+            span = f"  ({chosen[0][:10]} to {chosen[-1][:10]})"
+            text = f"{len(chosen)} of {total} backups selected{span}"
+        else:
+            text = f"No backup selected (0 of {total}) - check at least one to continue"
+        self.query_one("#summary", Static).update(text)
+
+    def action_all(self):
+        self.dates.select_all()
+
+    def action_none(self):
+        self.dates.deselect_all()
+
+    def action_oldest(self):
+        total = len(self.app.source.snapshots)
+        self.app.push_screen(OldestDialog(total, max(1, total // 2)), self._apply_oldest)
+
+    def _apply_oldest(self, n):
+        if n:
+            self.dates.deselect_all()
+            for d in self.app.source.snapshots[:n]:  # snapshots are sorted oldest first
+                self.dates.select(d)
+
+    def action_continue(self):
+        chosen = sorted(self.dates.selected)
+        if not chosen:
+            self.notify("Check at least one backup first.", severity="warning")
+            return
+        self.app.dates = chosen
+        self.app.push_screen(DestinationScreen())
+
+
+class DestinationScreen(Screen):
+    """Step 3 (placeholder until the next iteration)."""
 
     BINDINGS = [("escape", "app.pop_screen", "Back"), ("q", "app.quit", "Quit")]
 
     def compose(self) -> ComposeResult:
-        yield StepBar(2)
-        src = self.app.source
-        yield Static(f"Source: {src.name}  ({len(src.snapshots)} snapshots)", classes="heading")
-        yield Static("Choosing dates and folders comes next.", classes="dim")
+        yield StepBar(3)
+        yield Static(f"{len(self.app.dates)} backups selected", classes="heading")
+        yield Static("Choosing the destination comes next.", classes="dim")
         yield Footer()
 
 
@@ -223,6 +332,7 @@ class StaApp(App):
         self.discover = discover
         self.skip_welcome = skip_welcome
         self.source = None
+        self.dates = []
 
     def on_mount(self):
         self.push_screen(SourceScreen() if self.skip_welcome else WelcomeScreen())

@@ -72,10 +72,98 @@ class TestTui(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             await pilot.pause(0.3)
             self.assertEqual(app.source.name, "Good USB")
-            self.assertIsInstance(app.screen, tui.ContentsScreen)
+            self.assertIsInstance(app.screen, tui.BackupsScreen)
             await pilot.press("escape")
             await pilot.pause(0.2)
             self.assertIsInstance(app.screen, tui.SourceScreen)
+
+    async def open_backups(self, pilot, app):
+        await pilot.pause(0.5)
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        return app.screen.query_one("#dates")
+
+    async def test_step2_starts_with_every_backup_checked(self):
+        app = tui.StaApp(discover=fake_found, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            sl = await self.open_backups(pilot, app)
+            self.assertEqual(sorted(sl.selected), ["2026-08-23-203105", "2026-09-18-194541"])
+            self.assertIn("2 of 2 backups selected", str(app.screen.query_one("#summary").render()))
+
+    def six_backups(self):
+        v = fake_found()[0][1]
+        v.snapshots = [f"2026-09-0{i}-100000" for i in range(1, 7)]
+        return [v], []
+
+    async def test_step2_all_and_none(self):
+        app = tui.StaApp(discover=self.six_backups, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            sl = await self.open_backups(pilot, app)
+            await pilot.press("n")
+            await pilot.pause(0.1)
+            self.assertEqual(list(sl.selected), [])
+            self.assertIn("No backup selected", str(app.screen.query_one("#summary").render()))
+            await pilot.press("a")
+            await pilot.pause(0.1)
+            self.assertEqual(len(sl.selected), 6)
+
+    async def test_step2_oldest_n_default_is_half_and_enter_applies(self):
+        app = tui.StaApp(discover=self.six_backups, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            sl = await self.open_backups(pilot, app)
+            await pilot.press("o")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.OldestDialog)
+            await pilot.press("enter")  # default = 6 // 2 = 3
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.BackupsScreen)
+            self.assertEqual(
+                sorted(sl.selected), ["2026-09-01-100000", "2026-09-02-100000", "2026-09-03-100000"]
+            )
+
+    async def test_step2_oldest_n_typed_and_invalid_numbers_are_refused(self):
+        app = tui.StaApp(discover=self.six_backups, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            sl = await self.open_backups(pilot, app)
+            await pilot.press("o")
+            await pilot.pause(0.2)
+            await pilot.press("backspace", "9", "9", "enter")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.OldestDialog, "99 > 6 keeps the dialog open")
+            await pilot.press("backspace", "backspace", "2", "enter")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.BackupsScreen)
+            self.assertEqual(sorted(sl.selected), ["2026-09-01-100000", "2026-09-02-100000"])
+
+    async def test_step2_escape_cancels_the_dialog_without_changing_anything(self):
+        app = tui.StaApp(discover=self.six_backups, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            sl = await self.open_backups(pilot, app)
+            await pilot.press("o")
+            await pilot.pause(0.2)
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.BackupsScreen)
+            self.assertEqual(len(sl.selected), 6)
+
+    async def test_step2_continue_stores_the_choice_and_needs_at_least_one(self):
+        app = tui.StaApp(discover=fake_found, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.open_backups(pilot, app)
+            await pilot.press("n")
+            await pilot.press("c")
+            await pilot.pause(0.2)
+            self.assertIsInstance(
+                app.screen, tui.BackupsScreen, "cannot continue with nothing checked"
+            )
+            await pilot.press("a")
+            await pilot.press("c")
+            await pilot.pause(0.3)
+            self.assertIsInstance(app.screen, tui.DestinationScreen)
+            self.assertEqual(app.dates, ["2026-08-23-203105", "2026-09-18-194541"])
+
+    def test_nice_date(self):
+        self.assertEqual(tui.nice_date("2026-09-18-194541"), "2026-09-18  19:45:41")
 
     async def test_no_usable_disk_explains_what_to_do(self):
         app = tui.StaApp(discover=lambda: ([], []), skip_welcome=True)

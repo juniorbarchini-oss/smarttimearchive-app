@@ -112,3 +112,31 @@ AboutScreen {
     text-style: bold;
     color: #eaffea;
 }
+
+OldestDialog {
+    align: center middle;
+    background: #050a06 80%;
+}
+
+#dialog {
+    width: 56;
+    height: auto;
+    padding: 1 3;
+    border: double #33ff66;
+    background: #0a140c;
+}
+
+#dialog-title {
+    text-style: bold;
+    color: #eaffea;
+}
+
+Input {
+    background: #050a06;
+    color: #eaffea;
+    border: round #1f8f3f;
+}
+
+Input:focus {
+    border: round #66ff99;
+}

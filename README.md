@@ -1,13 +1,17 @@
 # SmartTimeArchive
 
-Extract the **history of a Time Machine (APFS) backup** into plain, dated folders you can browse
-and search with Finder — on another disk, or inside a disk image on a network share — without
-multiplying the space the history takes.
+Archive the **history of a Time Machine (APFS) backup disk** into plain, dated folders on another
+USB disk or a network unit, without multiplying the space the history takes. **Your Time Machine
+disk is never touched**: this only makes a copy.
 
-Apple does not let you copy an APFS Time Machine backup to another disk: each backup is a hidden
-snapshot and only Time Machine knows how to move them. If your backup disk is old or full, the usual
-advice is "keep it as an archive and start over". SmartTimeArchive turns that history into ordinary
-folders instead:
+Apple gives no way to copy an APFS Time Machine backup from a USB disk to another one: each backup is
+a hidden snapshot and only Time Machine knows how to move them. Its advice is "keep the old disk in a
+drawer and start over". This tool covers the two situations where that hurts:
+
+1. **The backup disk is filling up.** Time Machine will start overwriting the oldest backups. Archive
+   the N oldest ones now; Time Machine carries on exactly as before.
+2. **The backup disk is old and you fear it will die.** Archive everything, reuse the old disk for
+   something else, and start Time Machine from zero on a new disk. Nothing is lost.
 
 ```
 <destination>/
@@ -18,8 +22,8 @@ folders instead:
 
 Files that did not change between two backups are **hard links** to the same data, exactly like
 Time Machine itself does, so 12 snapshots that would take 671 GB as separate copies took 184 GB.
-It is an archive, not a Time Machine replacement: you open a folder and find what you deleted
-years ago.
+It is an archive, not a Time Machine replacement: to restore an old file, Time Machine does that
+already; this keeps the history safe when the disk can no longer hold it.
 
 > **Status:** the v2 engine (command line) is working and tested against a real 12-snapshot
 > backup. A terminal UI is next (see [Roadmap](#roadmap)).
