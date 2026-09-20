@@ -535,16 +535,24 @@ class PasswordScreen(Screen):
 
 
 class ScanScreen(Screen):
-    """Step 4b: warn about the time, scan with progress (pause / cancel), show the plan."""
+    """Step 4b: warn about the time, scan with progress (cancel), show the plan."""
 
     BINDINGS = [
         ("y", "yes", "Yes"),
         ("n", "no", "No"),
-        ("p", "pause", "Pause / resume"),
         ("c", "cancel", "Cancel"),
+        ("enter", "next", "Continue"),
         ("escape", "back", "Back"),
         ("q", "quit_app", "Quit"),
     ]
+
+    STEP = 4
+    TITLE = "Checking the disk space"
+    NOUN = "scan"
+    CANCELLED_TEXT = (
+        "Cancelled. Nothing was copied and your Time Machine disk was not changed.\n"
+        "Esc goes back."
+    )
 
     def __init__(self):
         super().__init__()
@@ -557,8 +565,8 @@ class ScanScreen(Screen):
 
     def compose(self) -> ComposeResult:
         app = self.app
-        yield StepBar(4)
-        yield Static("Checking the disk space", classes="heading")
+        yield StepBar(self.STEP)
+        yield Static(self.TITLE, classes="heading")
         yield Static(
             f"From:  {app.source.name}  ({len(app.dates)} backups)\n"
             f"To:    {app.dest_path}"
@@ -593,7 +601,7 @@ class ScanScreen(Screen):
                 f"{pending} of {total} backups were never scanned. Reading every file's\n"
                 "information can take several minutes per backup on an old or slow disk.\n"
                 "It happens once: the result is kept for next time.\n"
-                "While it runs you can pause (p) or cancel (c)."
+                "While it runs you can cancel with c."
             )
         else:
             text = f"All {total} backups were scanned before, so this should be quick."
@@ -627,9 +635,14 @@ class ScanScreen(Screen):
         self.app.plan = None
         self.keepalive = privileges.Keepalive()
         self.keepalive.start()
-        self.run_ = self.app.make_engine(self._args(), self._on_event, self._on_exit)
+        self.run_ = self.app.make_engine(
+            self._args(), self._on_event, self._on_exit, **self._engine_kw()
+        )
         self.run_.start()
         self._paint()
+
+    def _engine_kw(self):
+        return {}
 
     def _on_event(self, ev):
         self.app.call_from_thread(self._event, ev)
@@ -663,15 +676,14 @@ class ScanScreen(Screen):
         if self.state in ("running", "cancelling"):
             self._paint()
 
-    def action_pause(self):
-        if self.run_ and self.state == "running":
-            self.run_.resume() if self.run_.paused else self.run_.pause()
-            self._paint()
-
     def action_cancel(self):
         if self.state == "running":
             self.ask_cancel = True
             self._paint()
+
+    def action_next(self):
+        if self.state == "plan" and self.app.plan["fits"]:
+            self.app.push_screen(CopyScreen())
 
     def action_back(self):
         if self.state in ("confirm", "plan", "failed", "cancelled"):
@@ -681,7 +693,7 @@ class ScanScreen(Screen):
         if self.state not in ("running", "cancelling"):
             self.app.exit()
         else:
-            self.notify("Cancel first (c): a scan is running.", severity="warning")
+            self.notify(f"Cancel first (c): a {self.NOUN} is running.", severity="warning")
 
     def _paint(self):
         st = self.state
@@ -696,24 +708,18 @@ class ScanScreen(Screen):
                 lines.append(f"{p['entries']:,} entries read in this backup")
             if p.get("minutes_left"):
                 lines.append(f"About {p['minutes_left']} minutes left")
-            if self.run_ and self.run_.paused:
-                lines.append(
-                    "\nPAUSED - do not remove or unplug the disks until you resume or cancel.\n"
-                    "p resumes,  c cancels."
-                )
-            elif self.ask_cancel:
-                lines.append("\nCancel the scan?  y = yes, cancel   n = no, keep going")
+            if self.ask_cancel:
+                lines.append(f"\nCancel the {self.NOUN}?  y = yes, cancel   n = no, keep going")
             else:
-                lines.append("\np pauses,  c cancels")
+                lines.append("\nc cancels")
             self._set("\n".join(lines))
         elif st == "cancelling":
             self._set("Cancelling... unmounting the backups safely, one moment.")
         elif st == "cancelled":
-            self._set("Cancelled. Nothing was copied and your Time Machine disk was not changed.\n"
-                      "Esc goes back.")
+            self._set(self.CANCELLED_TEXT)
         elif st == "failed":
             detail = "\n".join(getattr(self, "tail", None) or ["(no details)"])
-            self._set(f"The scan failed. Nothing was copied.\n\n{detail}\n\nEsc goes back.")
+            self._set(f"The {self.NOUN} failed.\n\n{detail}\n\nEsc goes back.")
         elif st == "plan":
             self._set(plan_text(self.app.plan))
 
@@ -734,13 +740,165 @@ def plan_text(plan):
         "",
     ]
     if plan["fits"]:
-        lines.append("It fits. The copy step comes next.  Esc goes back.")
+        lines.append("It fits.  Enter continues to the copy.  Esc goes back.")
     else:
         lines.append(
             f"It does NOT fit: {fmt_bytes(need - free)} more space is needed.\n"
             "Nothing can continue from here. Esc goes back to pick another destination."
         )
     return "\n".join(lines)
+
+
+class CopyScreen(ScanScreen):
+    """Step 5: the real copy. Same cancel control as the scan; nothing starts by itself."""
+
+    BINDINGS = ScanScreen.BINDINGS + [("k", "awake", "Keep Mac awake")]
+    STEP = 5
+    TITLE = "Copying the archive"
+    NOUN = "copy"
+    CANCELLED_TEXT = (
+        "Cancelled. The backup being copied was left as a .partial folder; the ones already\n"
+        "finished are kept. Your Time Machine disk was not changed.  Esc goes back."
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.awake = False  # the user turns it on; it is never chosen for them
+        self.done_bytes = 0
+        self.finished = None
+        self.tail = []
+
+    def on_mount(self):
+        self.set_interval(1.0, self._refresh)
+        self._ask(0)
+
+    def _ask(self, _pending=0):
+        self.state = "confirm"
+        self._confirm_text()
+
+    def _confirm_text(self):
+        plan = self.app.plan
+        lines = [
+            f"{plan['snapshots']} backups, about {fmt_bytes(plan['bytes_needed'])} will be written.",
+            "Your Time Machine disk is only read, never changed.",
+            "A large archive can take hours.",
+            "",
+            f"({'x' if self.awake else ' '}) k  Keep this Mac awake while copying (uses caffeinate,"
+            " built into macOS)",
+        ]
+        if not os.environ.get("TMUX"):
+            lines += [
+                "",
+                "Tip: you are not inside tmux. Closing this terminal window stops the copy.",
+            ]
+        lines += ["", "Start copying?  y = yes   n = no"]
+        self._set("\n".join(lines))
+
+    def action_awake(self):
+        if self.state == "confirm":
+            self.awake = not self.awake
+            self._confirm_text()
+
+    def _engine_kw(self):
+        return {"keep_awake": self.awake}
+
+    def _args(self):
+        app = self.app
+        args = ["extract", app.source.mountpoint, app.dest_path, "--dates", ",".join(app.dates)]
+        if app.dest_image:
+            args.append("--dest-image")
+        elif not app.destination.hardlinks:
+            args.append("--yes")  # the user chose "store everything in full" for this disk
+        return args
+
+    def _start(self):
+        if not privileges.has_ticket():  # the sudo ticket may have expired since the scan
+            with self.app.suspend():
+                print("\nSmartTimeArchive needs your administrator password again (asked by sudo).\n")
+                ok = self.app.ask_password()
+            if not (ok and privileges.has_ticket()):
+                self.notify("The password was not accepted: nothing was started.", severity="error")
+                return
+        super()._start()
+
+    def _event(self, ev):
+        kind = ev.get("event")
+        p = self.progress
+        if kind in ("extract_start", "date_skipped"):
+            p.update(ev)
+            p["done"], p["total"], p["bytes_copied"] = 0, ev.get("entries", 0), 0
+        elif kind == "extract_progress":
+            p.update(ev)
+        elif kind == "date_done":
+            self.done_bytes += ev.get("bytes_copied", 0)
+            p.update(ev)
+            p["bytes_copied"] = 0  # already counted in done_bytes
+        elif kind == "image":
+            p["image"] = ev["path"]
+        elif kind == "warning":
+            p["warning"] = ev.get("message")
+        elif kind == "finished":
+            self.finished = ev
+        elif kind == "error":
+            self.tail = [ev.get("message", "")]
+        self._paint()
+
+    def _exit(self, code, tail):
+        if self.keepalive:
+            self.keepalive.stop()
+        if self.state == "cancelling" or code == 130:
+            self.state = "cancelled"
+        elif code in (0, 3) and self.finished:
+            self.state = "done"
+        else:
+            self.state = "failed"
+            self.tail = self.tail or tail
+        self._paint()
+
+    def _paint(self):
+        if self.state == "confirm":
+            return self._confirm_text()
+        if self.state != "running" and self.state != "done":
+            return super()._paint()
+        p = self.progress
+        if self.state == "done":
+            f = self.finished
+            ok = f["status"] == "COMPLETED"
+            self._set(
+                ("Done." if ok else "Done, with some files that could not be copied.")
+                + f"\nStatus: {f['status']}\n"
+                f"Copied: {fmt_bytes(self.done_bytes)}\n"
+                f"Report: {f.get('report_file')}\n\n"
+                "Verifying and the guide to free your disk come in the next step.  Esc goes back."
+            )
+            return
+        secs = int(time.time() - self.t0)
+        lines = [f"Copying...  {secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d} elapsed"]
+        if p.get("date"):
+            lines.append(f"Backup {p.get('i', '?')} of {p.get('n', '?')}: {nice_date(p['date'])}")
+            lines.append(f"{p.get('done', 0):,} of {p.get('total', 0):,} entries")
+            lines.append(
+                f"{fmt_bytes(self.done_bytes + p.get('bytes_copied', 0))} copied, "
+                f"{p.get('linked', 0):,} linked in this backup"
+            )
+            if p.get("errors"):
+                lines.append(f"{p['errors']:,} files could not be copied (they go in the report)")
+        else:
+            lines.append("Preparing (reading the scan)...")
+        if p.get("warning"):
+            lines.append(f"Warning: {p['warning']}")
+        if self.ask_cancel:
+            lines.append("\nCancel the copy?  y = yes, cancel   n = no, keep going")
+        else:
+            lines.append("\nc cancels")
+        self._set("\n".join(lines))
+
+    def action_back(self):
+        if self.state in ("confirm", "done", "failed", "cancelled"):
+            self.app.pop_screen()
+
+    def action_next(self):
+        pass
 
 
 class StaApp(App):
@@ -765,8 +923,8 @@ class StaApp(App):
     def scan_source(self, mountpoint):
         return core.ApfsSource(mountpoint)
 
-    def make_engine(self, args, on_event, on_exit):
-        return engine.EngineRun(args, on_event, on_exit)
+    def make_engine(self, args, on_event, on_exit, **kw):
+        return engine.EngineRun(args, on_event, on_exit, **kw)
 
     def ask_password(self):
         return privileges.ask()

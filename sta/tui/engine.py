@@ -6,20 +6,28 @@ import subprocess
 import sys
 import threading
 
+CAFFEINATE = "/usr/bin/caffeinate"
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class EngineRun:
-    def __init__(self, args, on_event, on_exit, popen=subprocess.Popen, run=subprocess.run):
+    def __init__(
+        self, args, on_event, on_exit, keep_awake=False, popen=subprocess.Popen, run=subprocess.run
+    ):
         self.args, self.on_event, self.on_exit = args, on_event, on_exit
+        self.keep_awake = keep_awake
         self._popen, self._run = popen, run
         self.pid = None
-        self.paused = False
         self.tail = []  # non-JSON lines (Python errors, sys.exit messages), for the error screen
+
+    def command(self):
+        # caffeinate ships with macOS; if it is somehow missing the copy simply runs without it
+        awake = [CAFFEINATE, "-i"] if self.keep_awake and os.path.exists(CAFFEINATE) else []
+        return ["sudo", "-n", *awake, sys.executable, "-m", "sta", *self.args, "--json"]
 
     def start(self):
         self.proc = self._popen(
-            ["sudo", "-n", sys.executable, "-m", "sta", *self.args, "--json"],
+            self.command(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -43,15 +51,5 @@ class EngineRun:
         if self.pid:
             self._run(["sudo", "-n", "kill", f"-{name}", str(self.pid)], capture_output=True)
 
-    def pause(self):
-        self._signal("STOP")
-        self.paused = True
-
-    def resume(self):
-        self._signal("CONT")
-        self.paused = False
-
     def cancel(self):
-        self._signal("INT")
-        if self.paused:  # a stopped process cannot see the signal until it runs again
-            self.resume()
+        self._signal("INT")  # the engine unwinds cleanly: unmounts and reports CANCELLED

@@ -416,21 +416,13 @@ class FakeEngine:
 
     instances = []
 
-    def __init__(self, args, on_event, on_exit):
-        self.args, self.on_event, self.on_exit = args, on_event, on_exit
+    def __init__(self, args, on_event, on_exit, **kw):
+        self.args, self.on_event, self.on_exit, self.kw = args, on_event, on_exit, kw
         self.paused, self.calls = False, []
         FakeEngine.instances.append(self)
 
     def start(self):
         self.calls.append("start")
-
-    def pause(self):
-        self.paused = True
-        self.calls.append("pause")
-
-    def resume(self):
-        self.paused = False
-        self.calls.append("resume")
 
     def cancel(self):
         self.calls.append("cancel")
@@ -438,7 +430,7 @@ class FakeEngine:
 
 PLAN = {
     "snapshots": 2, "files": 10, "unique_files": 4, "bytes_with_links": 4_000_000_000,
-    "bytes_without_links": 9_000_000_000, "bytes_needed_with_margin": 5_000_000_000,
+    "bytes_without_links": 9_000_000_000, "bytes_needed": 4_000_000_000, "bytes_needed_with_margin": 5_000_000_000,
     "dest_free": 50_000_000_000, "fits": True,
 }  # fmt: skip
 
@@ -469,7 +461,7 @@ class TestScanScreen(unittest.IsolatedAsyncioTestCase):
         async def go(app, pilot):
             self.assertIn("never scanned", self.body(app))
             self.assertEqual(FakeEngine.instances, [])
-            await pilot.press("p", "c")  # keys that mean nothing yet
+            await pilot.press("c")  # keys that mean nothing yet
             self.assertEqual(FakeEngine.instances, [])
             await pilot.press("y")
             await pilot.pause(0.2)
@@ -493,25 +485,6 @@ class TestScanScreen(unittest.IsolatedAsyncioTestCase):
 
         await self.open(go, pending=0)
 
-    async def test_progress_pause_warning_and_resume(self):
-        async def go(app, pilot):
-            await pilot.press("y")
-            eng = FakeEngine.instances[0]
-            await asyncio.to_thread(eng.on_event, {"event": "scan_snapshot", "i": 1, "n": 2, "date": "2026-08-23-203105"})
-            await asyncio.to_thread(eng.on_event, {"event": "scan_progress", "entries": 12345})
-            await pilot.pause(0.2)
-            self.assertIn("12,345 entries", self.body(app))
-            self.assertIn("Backup 1 of 2", self.body(app))
-            await pilot.press("p")
-            await pilot.pause(0.2)
-            self.assertTrue(eng.paused)
-            self.assertIn("do not remove or unplug", self.body(app))
-            await pilot.press("p")
-            await pilot.pause(0.2)
-            self.assertFalse(eng.paused)
-            self.assertNotIn("do not remove", self.body(app))
-
-        await self.open(go)
 
     async def test_cancel_needs_confirmation_and_n_keeps_going(self):
         async def go(app, pilot):
@@ -541,6 +514,9 @@ class TestScanScreen(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.2)
             self.assertIn("It fits", self.body(app))
             self.assertIn("WITH hard links", self.body(app))
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.CopyScreen)
 
         await self.open(go)
 
@@ -551,7 +527,9 @@ class TestScanScreen(unittest.IsolatedAsyncioTestCase):
             await asyncio.to_thread(eng.on_exit, 2, [])
             await pilot.pause(0.2)
             self.assertIn("does NOT fit", self.body(app))
-            self.assertNotIn("copy step comes next", self.body(app))
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.ScanScreen, "no space: cannot continue")
 
         await self.open(go2)
 
@@ -599,8 +577,129 @@ class TestEngineRun(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual([e["event"] for e in events], ["started", "plan"])
         self.assertEqual(exits, [(0, ["boom"])])
-        run.pause()
-        run.cancel()  # paused: must also resume so the signal is delivered
-        self.assertEqual(sent[0], ["sudo", "-n", "kill", "-STOP", "77"])
-        self.assertEqual([c[3] for c in sent], ["-STOP", "-INT", "-CONT"])
-        self.assertFalse(run.paused)
+        run.cancel()
+        self.assertEqual(sent, [["sudo", "-n", "kill", "-INT", "77"]])
+
+
+@unittest.skipUnless(HAVE_TEXTUAL, "textual not installed")
+class TestCopyScreen(unittest.IsolatedAsyncioTestCase):
+    async def open(self, pilot_fn, image=True, ticket=True, tmux=""):
+        from unittest import mock
+
+        FakeEngine.instances = []
+        app = tui.StaApp(skip_welcome=True)
+        app.source = fake_found()[0][1]
+        app.dates, app.dest_path, app.dest_image = list(app.source.snapshots), "/tmp/x", image
+        app.plan = dict(PLAN, bytes_needed=4_000_000_000)
+        app.destination = Destination("USB", "/tmp/x", "exfat", 1, False)
+        app.make_engine = FakeEngine
+        asked = []
+        app.ask_password = lambda: asked.append(1) or True
+        with mock.patch.dict(os.environ, {"TMUX": tmux}), mock.patch.object(
+            tui.privileges, "has_ticket", side_effect=lambda *a: ticket
+        ), mock.patch.object(tui.privileges.Keepalive, "start"), mock.patch.object(
+            type(app), "suspend", mock.MagicMock()
+        ):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.push_screen(tui.CopyScreen())
+                await pilot.pause(0.4)
+                await pilot_fn(app, pilot, asked)
+
+    def body(self, app):
+        return str(app.screen.query_one("#body").render())
+
+    async def test_confirm_first_keep_awake_is_off_and_tmux_tip(self):
+        async def go(app, pilot, asked):
+            text = self.body(app)
+            self.assertIn("( ) k", text)
+            self.assertIn("not inside tmux", text)
+            self.assertEqual(FakeEngine.instances, [])
+            await pilot.press("c")
+            self.assertEqual(FakeEngine.instances, [])
+            await pilot.press("k")
+            self.assertIn("(x) k", self.body(app))
+            await pilot.press("y")
+            await pilot.pause(0.2)
+            eng = FakeEngine.instances[0]
+            self.assertEqual(eng.args[0], "extract")
+            self.assertIn("--dest-image", eng.args)
+            self.assertEqual(eng.kw, {"keep_awake": True})
+
+        await self.open(go)
+
+    async def test_default_does_not_keep_awake_and_no_tip_inside_tmux(self):
+        async def go(app, pilot, asked):
+            self.assertNotIn("not inside tmux", self.body(app))
+            await pilot.press("y")
+            await pilot.pause(0.2)
+            eng = FakeEngine.instances[0]
+            self.assertEqual(eng.kw, {"keep_awake": False})
+            self.assertIn("--yes", eng.args)
+            self.assertNotIn("--dest-image", eng.args)
+
+        await self.open(go, image=False, tmux="/tmp/tmux")
+
+    async def test_progress_done_and_totals(self):
+        async def go(app, pilot, asked):
+            await pilot.press("y")
+            eng = FakeEngine.instances[0]
+            feed = lambda ev: asyncio.to_thread(eng.on_event, ev)  # noqa: E731
+            await feed({"event": "extract_start", "date": "2026-08-23-203105", "i": 1, "n": 2,
+                        "entries": 100})  # fmt: skip
+            await feed({"event": "extract_progress", "done": 40, "total": 100,
+                        "bytes_copied": 2_000_000_000, "linked": 7, "errors": 0})  # fmt: skip
+            await pilot.pause(0.2)
+            text = self.body(app)
+            self.assertIn("Backup 1 of 2", text)
+            self.assertIn("40 of 100", text)
+            self.assertIn("2.0 GB copied", text)
+            await feed({"event": "date_done", "bytes_copied": 3_000_000_000, "errors": 0})
+            await feed({"event": "finished", "status": "COMPLETED", "report_file": "/r.txt"})
+            await asyncio.to_thread(eng.on_exit, 0, [])
+            await pilot.pause(0.2)
+            text = self.body(app)
+            self.assertIn("Done.", text)
+            self.assertIn("3.0 GB", text)
+            self.assertIn("/r.txt", text)
+
+        await self.open(go)
+
+    async def test_cancel_keeps_finished_dates(self):
+        async def go(app, pilot, asked):
+            await pilot.press("y")
+            eng = FakeEngine.instances[0]
+            await pilot.press("p")  # there is no pause: the key does nothing
+            await pilot.press("c", "y")
+            await pilot.pause(0.2)
+            self.assertIn("cancel", eng.calls)
+            await asyncio.to_thread(eng.on_exit, 130, [])
+            await pilot.pause(0.2)
+            self.assertIn(".partial", self.body(app))
+
+        await self.open(go)
+
+    async def test_expired_ticket_asks_again_and_never_starts_silently(self):
+        async def go(app, pilot, asked):
+            await pilot.press("y")
+            await pilot.pause(0.2)
+            self.assertEqual(len(asked), 1)
+            self.assertEqual(FakeEngine.instances, [], "no valid ticket after asking: no start")
+
+        await self.open(go, ticket=False)
+
+
+class TestEngineCommand(unittest.TestCase):
+    def test_caffeinate_only_when_asked_and_present(self):
+        from unittest import mock
+
+        from sta.tui import engine
+
+        base = engine.EngineRun(["extract"], None, None).command()
+        self.assertNotIn(engine.CAFFEINATE, base)
+        awake = engine.EngineRun(["extract"], None, None, keep_awake=True)
+        with mock.patch.object(engine.os.path, "exists", return_value=True):
+            cmd = awake.command()
+        self.assertEqual(cmd[:4], ["sudo", "-n", engine.CAFFEINATE, "-i"])
+        with mock.patch.object(engine.os.path, "exists", return_value=False):
+            self.assertNotIn(engine.CAFFEINATE, awake.command())
+
