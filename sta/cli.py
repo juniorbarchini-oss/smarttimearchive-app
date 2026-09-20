@@ -184,8 +184,14 @@ def main(argv=None):
         sys.exit("no snapshots match the selection")
     opts = core.Options(_csv(args.users), _csv(args.folders), args.exclude)
     work = tempfile.mkdtemp(prefix="sta_work_")
+    if args.cmd == "plan":  # a scan can be cancelled: unwind (unmount) instead of dying
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, signal.default_int_handler)
     try:
         return _run(args, source, dates, opts, work)
+    except KeyboardInterrupt:
+        Out(getattr(args, "json", False)).event({"event": "cancelled"})
+        return 130
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -227,6 +233,7 @@ def _extract(source, dest, conn, dates, plan, cancelled, out):
 
 def _run(args, source, dates, opts, work):
     out = Out(args.json)
+    out.event({"event": "started", "pid": os.getpid()})
     use_cache = args.source_type == "apfs" and not args.no_cache
     pending = core.uncached_dates(source, dates, opts) if use_cache else dates
     if pending:

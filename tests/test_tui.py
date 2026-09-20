@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 import shutil
@@ -408,3 +409,198 @@ class TestPasswordScreen(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_or_cancelled_password_stays_and_lets_the_user_retry(self):
         name, asked = await self._run([False], False)
         self.assertEqual((name, len(asked)), ("PasswordScreen", 1))
+
+
+class FakeEngine:
+    """Stands in for the root subprocess: the test feeds it events by hand."""
+
+    instances = []
+
+    def __init__(self, args, on_event, on_exit):
+        self.args, self.on_event, self.on_exit = args, on_event, on_exit
+        self.paused, self.calls = False, []
+        FakeEngine.instances.append(self)
+
+    def start(self):
+        self.calls.append("start")
+
+    def pause(self):
+        self.paused = True
+        self.calls.append("pause")
+
+    def resume(self):
+        self.paused = False
+        self.calls.append("resume")
+
+    def cancel(self):
+        self.calls.append("cancel")
+
+
+PLAN = {
+    "snapshots": 2, "files": 10, "unique_files": 4, "bytes_with_links": 4_000_000_000,
+    "bytes_without_links": 9_000_000_000, "bytes_needed_with_margin": 5_000_000_000,
+    "dest_free": 50_000_000_000, "fits": True,
+}  # fmt: skip
+
+
+@unittest.skipUnless(HAVE_TEXTUAL, "textual not installed")
+class TestScanScreen(unittest.IsolatedAsyncioTestCase):
+    async def open(self, pilot_fn, pending=2, fits=True):
+        FakeEngine.instances = []
+        app = tui.StaApp(skip_welcome=True)
+        app.source = fake_found()[0][1]
+        app.dates, app.dest_path = list(app.source.snapshots), "/tmp/x"
+        app.make_engine = FakeEngine
+        app.scan_source = lambda mp: None
+        from unittest import mock
+
+        with mock.patch.object(
+            tui.core, "uncached_dates", return_value=app.dates[:pending]
+        ), mock.patch.object(tui.privileges.Keepalive, "start"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.push_screen(tui.ScanScreen())
+                await pilot.pause(0.4)
+                await pilot_fn(app, pilot)
+
+    def body(self, app):
+        return str(app.screen.query_one("#body").render())
+
+    async def test_warns_about_time_and_does_nothing_until_yes(self):
+        async def go(app, pilot):
+            self.assertIn("never scanned", self.body(app))
+            self.assertEqual(FakeEngine.instances, [])
+            await pilot.press("p", "c")  # keys that mean nothing yet
+            self.assertEqual(FakeEngine.instances, [])
+            await pilot.press("y")
+            await pilot.pause(0.2)
+            self.assertEqual(FakeEngine.instances[0].calls, ["start"])
+            self.assertEqual(FakeEngine.instances[0].args[0], "plan")
+
+        await self.open(go)
+
+    async def test_no_goes_back_without_starting(self):
+        async def go(app, pilot):
+            await pilot.press("n")
+            await pilot.pause(0.2)
+            self.assertNotIsInstance(app.screen, tui.ScanScreen)
+            self.assertEqual(FakeEngine.instances, [])
+
+        await self.open(go)
+
+    async def test_all_cached_says_it_is_quick(self):
+        async def go(app, pilot):
+            self.assertIn("quick", self.body(app))
+
+        await self.open(go, pending=0)
+
+    async def test_progress_pause_warning_and_resume(self):
+        async def go(app, pilot):
+            await pilot.press("y")
+            eng = FakeEngine.instances[0]
+            await asyncio.to_thread(eng.on_event, {"event": "scan_snapshot", "i": 1, "n": 2, "date": "2026-08-23-203105"})
+            await asyncio.to_thread(eng.on_event, {"event": "scan_progress", "entries": 12345})
+            await pilot.pause(0.2)
+            self.assertIn("12,345 entries", self.body(app))
+            self.assertIn("Backup 1 of 2", self.body(app))
+            await pilot.press("p")
+            await pilot.pause(0.2)
+            self.assertTrue(eng.paused)
+            self.assertIn("do not remove or unplug", self.body(app))
+            await pilot.press("p")
+            await pilot.pause(0.2)
+            self.assertFalse(eng.paused)
+            self.assertNotIn("do not remove", self.body(app))
+
+        await self.open(go)
+
+    async def test_cancel_needs_confirmation_and_n_keeps_going(self):
+        async def go(app, pilot):
+            await pilot.press("y")
+            eng = FakeEngine.instances[0]
+            await pilot.press("c")
+            self.assertIn("Cancel the scan?", self.body(app))
+            self.assertNotIn("cancel", eng.calls)
+            await pilot.press("n")
+            await pilot.pause(0.2)
+            self.assertNotIn("Cancel the scan?", self.body(app))
+            await pilot.press("c", "y")
+            await pilot.pause(0.2)
+            self.assertIn("cancel", eng.calls)
+            await asyncio.to_thread(eng.on_exit, 130, [])
+            await pilot.pause(0.2)
+            self.assertIn("Nothing was copied", self.body(app))
+
+        await self.open(go)
+
+    async def test_plan_fits_and_does_not_fit(self):
+        async def go(app, pilot):
+            await pilot.press("y")
+            eng = FakeEngine.instances[0]
+            await asyncio.to_thread(eng.on_event, {"event": "plan", **PLAN})
+            await asyncio.to_thread(eng.on_exit, 0, [])
+            await pilot.pause(0.2)
+            self.assertIn("It fits", self.body(app))
+            self.assertIn("WITH hard links", self.body(app))
+
+        await self.open(go)
+
+        async def go2(app, pilot):
+            await pilot.press("y")
+            eng = FakeEngine.instances[0]
+            await asyncio.to_thread(eng.on_event, {"event": "plan", **PLAN, "fits": False, "dest_free": 1_000_000_000})
+            await asyncio.to_thread(eng.on_exit, 2, [])
+            await pilot.pause(0.2)
+            self.assertIn("does NOT fit", self.body(app))
+            self.assertNotIn("copy step comes next", self.body(app))
+
+        await self.open(go2)
+
+    async def test_engine_failure_shows_the_reason(self):
+        async def go(app, pilot):
+            await pilot.press("y")
+            await asyncio.to_thread(FakeEngine.instances[0].on_exit, 1, ["error: something broke"])
+            await pilot.pause(0.2)
+            self.assertIn("scan failed", self.body(app))
+            self.assertIn("something broke", self.body(app))
+
+        await self.open(go)
+
+    async def test_cannot_quit_or_leave_while_running(self):
+        async def go(app, pilot):
+            await pilot.press("y")
+            await pilot.press("q", "escape")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.ScanScreen)
+
+        await self.open(go)
+
+
+class TestEngineRun(unittest.TestCase):
+    def test_relays_events_tracks_pid_and_signals_through_sudo(self):
+        import io
+        from types import SimpleNamespace as R
+
+        from sta.tui import engine
+
+        proc = R(stdout=io.StringIO('{"event": "started", "pid": 77}\nboom\n{"event": "plan"}\n'),
+                 wait=lambda: 0)  # fmt: skip
+        events, exits, sent = [], [], []
+        run = engine.EngineRun(
+            ["plan", "/v", "/d"], events.append, lambda c, t: exits.append((c, t)),
+            popen=lambda cmd, **k: proc, run=lambda cmd, **k: sent.append(cmd),
+        )  # fmt: skip
+        run.start()
+        run._thread_done = None
+        import time
+
+        for _ in range(50):
+            if exits:
+                break
+            time.sleep(0.02)
+        self.assertEqual([e["event"] for e in events], ["started", "plan"])
+        self.assertEqual(exits, [(0, ["boom"])])
+        run.pause()
+        run.cancel()  # paused: must also resume so the signal is delivered
+        self.assertEqual(sent[0], ["sudo", "-n", "kill", "-STOP", "77"])
+        self.assertEqual([c[3] for c in sent], ["-STOP", "-INT", "-CONT"])
+        self.assertFalse(run.paused)

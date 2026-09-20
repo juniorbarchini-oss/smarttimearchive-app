@@ -11,8 +11,8 @@ from textual.widgets import DirectoryTree, Footer, Input, OptionList, SelectionL
 from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 
-from .. import AUTHOR, DISCLAIMER, REPO, SUPPORT, __version__, discover
-from . import art, privileges
+from .. import AUTHOR, DISCLAIMER, REPO, SUPPORT, __version__, core, discover
+from . import art, engine, privileges
 
 STEPS = ["Source", "Backups", "Destination", "Scan", "Run", "Report"]
 
@@ -535,22 +535,212 @@ class PasswordScreen(Screen):
 
 
 class ScanScreen(Screen):
-    """Step 4 (placeholder until the next iteration)."""
+    """Step 4b: warn about the time, scan with progress (pause / cancel), show the plan."""
 
-    BINDINGS = [("escape", "app.pop_screen", "Back"), ("q", "app.quit", "Quit")]
+    BINDINGS = [
+        ("y", "yes", "Yes"),
+        ("n", "no", "No"),
+        ("p", "pause", "Pause / resume"),
+        ("c", "cancel", "Cancel"),
+        ("escape", "back", "Back"),
+        ("q", "quit_app", "Quit"),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.state = "checking"  # checking > confirm > running > cancelling > plan/failed/cancelled
+        self.run_ = None
+        self.keepalive = None
+        self.t0 = 0.0
+        self.progress = {}
+        self.ask_cancel = False
 
     def compose(self) -> ComposeResult:
         app = self.app
         yield StepBar(4)
-        yield Static("Ready to check the space", classes="heading")
+        yield Static("Checking the disk space", classes="heading")
         yield Static(
             f"From:  {app.source.name}  ({len(app.dates)} backups)\n"
             f"To:    {app.dest_path}"
             + ("   (inside an APFS disk image)" if app.dest_image else ""),
             classes="dim",
         )
-        yield Static("The scan and the size check come next.", classes="dim")
+        yield Static("", id="body", classes="note")
         yield Footer()
+
+    def on_mount(self):
+        self.set_interval(1.0, self._refresh)
+        self._set("Looking at what was scanned before...")
+        self.run_worker(self._check, thread=True, exclusive=True)
+
+    def _set(self, text):
+        self.query_one("#body", Static).update(text)
+
+    # -- before: warn and ask ------------------------------------------------
+    def _check(self):
+        try:
+            src = self.app.scan_source(self.app.source.mountpoint)
+            pending = core.uncached_dates(src, self.app.dates, core.Options())
+        except Exception:  # unknown: assume the worst rather than promise it is quick
+            pending = list(self.app.dates)
+        self.app.call_from_thread(self._ask, len(pending))
+
+    def _ask(self, pending):
+        total = len(self.app.dates)
+        self.state = "confirm"
+        if pending:
+            text = (
+                f"{pending} of {total} backups were never scanned. Reading every file's\n"
+                "information can take several minutes per backup on an old or slow disk.\n"
+                "It happens once: the result is kept for next time.\n"
+                "While it runs you can pause (p) or cancel (c)."
+            )
+        else:
+            text = f"All {total} backups were scanned before, so this should be quick."
+        self._set(text + "\n\nContinue?  y = yes   n = no")
+
+    # -- running -------------------------------------------------------------
+    def _args(self):
+        app = self.app
+        args = ["plan", app.source.mountpoint, app.dest_path, "--dates", ",".join(app.dates)]
+        return args + (["--dest-image"] if app.dest_image else [])
+
+    def action_yes(self):
+        if self.state == "confirm":
+            self._start()
+        elif self.ask_cancel:
+            self.ask_cancel = False
+            self.state = "cancelling"
+            self.run_.cancel()
+            self._paint()
+        # y means nothing anywhere else: never act by accident
+
+    def action_no(self):
+        if self.state == "confirm":
+            self.app.pop_screen()
+        elif self.ask_cancel:
+            self.ask_cancel = False
+            self._paint()
+
+    def _start(self):
+        self.state, self.t0 = "running", time.time()
+        self.app.plan = None
+        self.keepalive = privileges.Keepalive()
+        self.keepalive.start()
+        self.run_ = self.app.make_engine(self._args(), self._on_event, self._on_exit)
+        self.run_.start()
+        self._paint()
+
+    def _on_event(self, ev):
+        self.app.call_from_thread(self._event, ev)
+
+    def _event(self, ev):
+        kind = ev.get("event")
+        if kind in ("scan_snapshot", "scan_progress", "scan_eta"):
+            self.progress.update(ev)
+        elif kind == "plan":
+            self.app.plan = ev
+        elif kind == "error":
+            self.tail = [ev.get("message", "")]
+        self._paint()
+
+    def _on_exit(self, code, tail):
+        self.app.call_from_thread(self._exit, code, tail)
+
+    def _exit(self, code, tail):
+        if self.keepalive:
+            self.keepalive.stop()
+        if self.state == "cancelling" or code == 130:
+            self.state = "cancelled"
+        elif code in (0, 2) and getattr(self.app, "plan", None):
+            self.state = "plan"
+        else:
+            self.state = "failed"
+            self.tail = getattr(self, "tail", None) or tail
+        self._paint()
+
+    def _refresh(self):
+        if self.state in ("running", "cancelling"):
+            self._paint()
+
+    def action_pause(self):
+        if self.run_ and self.state == "running":
+            self.run_.resume() if self.run_.paused else self.run_.pause()
+            self._paint()
+
+    def action_cancel(self):
+        if self.state == "running":
+            self.ask_cancel = True
+            self._paint()
+
+    def action_back(self):
+        if self.state in ("confirm", "plan", "failed", "cancelled"):
+            self.app.pop_screen()
+
+    def action_quit_app(self):
+        if self.state not in ("running", "cancelling"):
+            self.app.exit()
+        else:
+            self.notify("Cancel first (c): a scan is running.", severity="warning")
+
+    def _paint(self):
+        st = self.state
+        if st == "running":
+            p = self.progress
+            mins = int((time.time() - self.t0) // 60)
+            secs = int((time.time() - self.t0) % 60)
+            lines = [f"Scanning...  {mins}:{secs:02d} elapsed"]
+            if p.get("date"):
+                lines.append(f"Backup {p.get('i', '?')} of {p.get('n', '?')}: {nice_date(p['date'])}")
+            if p.get("entries"):
+                lines.append(f"{p['entries']:,} entries read in this backup")
+            if p.get("minutes_left"):
+                lines.append(f"About {p['minutes_left']} minutes left")
+            if self.run_ and self.run_.paused:
+                lines.append(
+                    "\nPAUSED - do not remove or unplug the disks until you resume or cancel.\n"
+                    "p resumes,  c cancels."
+                )
+            elif self.ask_cancel:
+                lines.append("\nCancel the scan?  y = yes, cancel   n = no, keep going")
+            else:
+                lines.append("\np pauses,  c cancels")
+            self._set("\n".join(lines))
+        elif st == "cancelling":
+            self._set("Cancelling... unmounting the backups safely, one moment.")
+        elif st == "cancelled":
+            self._set("Cancelled. Nothing was copied and your Time Machine disk was not changed.\n"
+                      "Esc goes back.")
+        elif st == "failed":
+            detail = "\n".join(getattr(self, "tail", None) or ["(no details)"])
+            self._set(f"The scan failed. Nothing was copied.\n\n{detail}\n\nEsc goes back.")
+        elif st == "plan":
+            self._set(plan_text(self.app.plan))
+
+    def on_unmount(self):
+        if self.keepalive:
+            self.keepalive.stop()
+
+
+def plan_text(plan):
+    need, free = plan["bytes_needed_with_margin"], plan["dest_free"]
+    lines = [
+        f"Backups selected:        {plan['snapshots']}",
+        f"Files:                   {plan['files']:,}  ({plan['unique_files']:,} unique)",
+        f"Size WITH hard links:    {fmt_bytes(plan['bytes_with_links'])}",
+        f"Size WITHOUT hard links: {fmt_bytes(plan['bytes_without_links'])}",
+        f"Space needed (+margin):  {fmt_bytes(need)}",
+        f"Free on the destination: {fmt_bytes(free)}",
+        "",
+    ]
+    if plan["fits"]:
+        lines.append("It fits. The copy step comes next.  Esc goes back.")
+    else:
+        lines.append(
+            f"It does NOT fit: {fmt_bytes(need - free)} more space is needed.\n"
+            "Nothing can continue from here. Esc goes back to pick another destination."
+        )
+    return "\n".join(lines)
 
 
 class StaApp(App):
@@ -570,6 +760,13 @@ class StaApp(App):
         self.destination = None
         self.dest_path = None
         self.dest_image = False
+        self.plan = None
+
+    def scan_source(self, mountpoint):
+        return core.ApfsSource(mountpoint)
+
+    def make_engine(self, args, on_event, on_exit):
+        return engine.EngineRun(args, on_event, on_exit)
 
     def ask_password(self):
         return privileges.ask()

@@ -36,6 +36,19 @@ class TestEvents(Fixture):
             code = cli.main(list(argv))
         return code, buf.getvalue()
 
+    def test_plan_announces_its_pid_and_a_cancel_is_reported_not_a_crash(self):
+        from unittest import mock
+
+        code, text = self.run_cli("plan", self.src, self.dst, "--source-type", "dir", "--json")
+        first = json.loads(text.splitlines()[0])
+        self.assertEqual((first["event"], first["pid"]), ("started", os.getpid()))
+        with mock.patch.object(core, "scan", side_effect=KeyboardInterrupt):
+            code, text = self.run_cli(
+                "plan", self.src, self.dst, "--source-type", "dir", "--json"
+            )
+        self.assertEqual(code, 130)
+        self.assertEqual(json.loads(text.splitlines()[-1]), {"event": "cancelled"})
+
     def test_json_mode_is_pure_json_lines(self):
         code, text = self.run_cli("extract", self.src, self.dst, "--source-type", "dir", "--json")
         self.assertEqual(code, 0)
