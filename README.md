@@ -25,29 +25,51 @@ Time Machine itself does, so 12 snapshots that would take 671 GB as separate cop
 It is an archive, not a Time Machine replacement: to restore an old file, Time Machine does that
 already; this keeps the history safe when the disk can no longer hold it.
 
-> **Status:** the v2 engine (command line) is working and tested against a real 12-snapshot
-> backup. A terminal UI is next (see [Roadmap](#roadmap)).
+## Install
 
-## Terminal UI
-
-A guided, retro-green wizard on top of the same engine (welcome banner, then: source, contents,
-destination, scan, run, report). It runs as your user and asks for `sudo` only for the engine.
+**From the source** (no security warning from macOS: nothing is downloaded through a browser):
 
 ```bash
-python3 -m venv venv && venv/bin/pip install textual   # once
-./smarttimearchive                                     # opens the UI (no arguments)
+git clone https://github.com/juniorbarchini-oss/smarttimearchive-app.git
+cd smarttimearchive-app && ./install.sh
 ```
 
+It asks for your administrator password once. It installs:
+
+| what | where |
+|---|---|
+| the engine and its own Python environment | `/usr/local/lib/smarttimearchive` (owned by root) |
+| the `sta` command | `/usr/local/bin/sta` |
+| the app (opens Terminal at the right size) | `/Applications/SmartTimeArchive.app` |
+
+The engine runs as administrator, so its code lives where only an administrator can change it.
+To remove everything: `/usr/local/lib/smarttimearchive/uninstall.sh` (it asks before deleting the
+scan cache and never touches your archives).
+
+## Use
+
+- **App:** double-click *SmartTimeArchive* in Applications or Launchpad.
+- **Terminal:** `sta` opens the UI; `sta --tmux` runs it inside `tmux` so a long copy survives a
+  closed window (if `tmux` is missing it says so and runs without it).
+- **Engine commands:** `sta plan | extract | verify | list ...` (see below).
+
+A guided, retro-green wizard: source, backups, destination, administrator password, scan, copy,
+report (with an optional verification). It runs as your user and uses `sudo` only for the engine.
+You choose everything: nothing is preselected and nothing starts without your yes. A copy can be
+cancelled at any moment; each copy into an APFS disk image creates a new image.
+
 Source disks are detected automatically: only local USB disks with Time Machine snapshots are
-offered, and the others are listed with the reason they cannot be used. *Status: welcome and
-source screens are done; the rest of the steps are being added.* The engine commands below work
-without installing anything.
+offered, and the others are listed with the reason they cannot be used.
 
 ## Requirements
 
-- macOS with the APFS Time Machine backup disk (a local USB disk) mounted.
-- Python 3.9+ — standard library only.
-- `sudo`: mounting snapshots needs root. Everything the tool writes is handed back to your user.
+- **macOS 11 (Big Sur) or newer**, Intel or Apple silicon. Time Machine saves APFS backups, the only
+  kind this tool reads, since macOS 11.
+- The APFS Time Machine backup disk (a local USB disk) mounted, and an administrator password.
+- **Python 3.9 or newer** for the installer. macOS 13+ gets one with `xcode-select --install`; on
+  macOS 11-12 use Homebrew (`brew install python`) or python.org.
+- The engine itself uses only the standard library; the UI needs [Textual](https://textual.textualize.io)
+  (the installer fetches it once).
 
 ## Usage
 
