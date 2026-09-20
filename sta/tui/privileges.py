@@ -14,10 +14,20 @@ def has_ticket(run=subprocess.run):
         return False
 
 
-def ask(run=subprocess.run):
-    """Let sudo prompt on the real terminal (call this with the TUI suspended)."""
+def ask(password, run=subprocess.run):
+    """Hand the password to `sudo -v` through stdin (never argv) and forget it.
+
+    The ticket belongs to the terminal this program runs in, so the engine's later
+    `sudo -n` calls find it. Nothing here stores or logs the password.
+    """
     try:
-        return run(["sudo", "-v"]).returncode == 0
+        r = run(
+            ["sudo", "-S", "-v", "-p", ""],
+            input=password + "\n",
+            capture_output=True,
+            text=True,
+        )
+        return r.returncode == 0
     except OSError:
         return False
 

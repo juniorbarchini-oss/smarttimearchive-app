@@ -493,17 +493,44 @@ class FolderScreen(Screen):
         dates, _ = discover.existing_archive(path)
         if dates and not image:  # an image is always a new one: nothing to skip inside it
             self.notify(f"An archive is already here ({len(dates)} dates): those are skipped.")
-        self.app.push_screen(PasswordScreen())
+        self.app.push_screen(ScanScreen() if privileges.has_ticket() else PasswordScreen())
 
 
-class PasswordScreen(Screen):
-    """Step 4a: explain why administrator access is needed, then let sudo ask for it."""
+class PasswordEntry:
+    """Masked password field shared by the step and the pop-up. The password goes to sudo and is
+    dropped: it is not kept in a variable of ours, not shown and not written anywhere."""
 
-    BINDINGS = [
-        ("enter", "continue", "Continue"),
-        ("escape", "app.pop_screen", "Back"),
-        ("q", "app.quit", "Quit"),
-    ]
+    def _field(self):
+        return Input(password=True, placeholder="administrator password", id="pw")
+
+    def on_input_submitted(self, event):
+        if event.input.id != "pw":
+            return
+        password, event.input.value = event.value, ""
+        if not password:
+            return
+        event.input.disabled = True
+        self.query_one("#result", Static).update("Checking...")
+        self.run_worker(lambda: self._try(password), thread=True, exclusive=True)
+
+    def _try(self, password):
+        ok = self.app.ask_password(password) and privileges.has_ticket()
+        self.app.call_from_thread(self._answered, ok)
+
+    def _answered(self, ok):
+        field = self.query_one("#pw", Input)
+        field.disabled = False
+        if ok:
+            self._granted()
+        else:
+            self.query_one("#result", Static).update("That password was not accepted. Try again.")
+            field.focus()
+
+
+class PasswordScreen(PasswordEntry, Screen):
+    """Step 4a: explain why administrator access is needed and ask for it, right here."""
+
+    BINDINGS = [("escape", "app.pop_screen", "Back")]
 
     def compose(self) -> ComposeResult:
         yield StepBar(4)
@@ -511,27 +538,44 @@ class PasswordScreen(Screen):
         yield Static(
             "The engine needs your administrator password to mount the Time Machine\n"
             "snapshots and to read every user's files.\n\n"
+            "  - It is only handed to sudo to unlock the engine: this program does not\n"
+            "    keep it or write it anywhere.\n"
             "  - This program keeps running as your normal user.\n"
-            "  - macOS asks for the password itself; this program never sees or stores it.\n"
             "  - Nothing is written to, or deleted from, your Time Machine disk.\n"
-            "  - You can cancel or go back at any moment.",
+            "  - Esc goes back at any moment.",
             classes="dim",
         )
-        yield Static("", id="result", classes="note")
+        yield self._field()
+        yield Static("Type it and press Enter.", id="result", classes="note")
         yield Footer()
 
-    def action_continue(self):
-        result = self.query_one("#result", Static)
-        if privileges.has_ticket():
-            self.app.push_screen(ScanScreen())
-            return
-        with self.app.suspend():
-            print("\nSmartTimeArchive needs your administrator password (asked by sudo).\n")
-            ok = self.app.ask_password()
-        if ok and privileges.has_ticket():
-            self.app.push_screen(ScanScreen())
-        else:
-            result.update("The password was not accepted or was cancelled. Press Enter to try again.")
+    def on_mount(self):
+        self.query_one("#pw", Input).focus()
+
+    def _granted(self):
+        self.app.push_screen(ScanScreen())
+
+
+class PasswordModal(PasswordEntry, ModalScreen):
+    """The sudo ticket expired in the middle of the wizard: ask again without leaving the TUI."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog-box"):
+            yield Static("Administrator password needed again", classes="dialog-title")
+            yield Static("The previous authorization expired.", classes="dim")
+            yield self._field()
+            yield Static("Type it and press Enter - Esc cancels", id="result", classes="dim")
+
+    def on_mount(self):
+        self.query_one("#pw", Input).focus()
+
+    def _granted(self):
+        self.dismiss(True)
+
+    def action_cancel(self):
+        self.dismiss(False)
 
 
 class ScanScreen(Screen):
@@ -632,12 +676,8 @@ class ScanScreen(Screen):
 
     def _start(self):
         if not privileges.has_ticket():  # the sudo ticket may have expired since the last step
-            with self.app.suspend():
-                print("\nSmartTimeArchive needs your administrator password again (asked by sudo).\n")
-                ok = self.app.ask_password()
-            if not (ok and privileges.has_ticket()):
-                self.notify("The password was not accepted: nothing was started.", severity="error")
-                return
+            self.app.push_screen(PasswordModal(), lambda ok: ok and self._start())
+            return
         self.state, self.t0 = "running", time.time()
         self.app.plan = None
         self.keepalive = privileges.Keepalive()
@@ -1071,8 +1111,8 @@ class StaApp(App):
     def make_engine(self, args, on_event, on_exit, **kw):
         return engine.EngineRun(args, on_event, on_exit, **kw)
 
-    def ask_password(self):
-        return privileges.ask()
+    def ask_password(self, password):
+        return privileges.ask(password)
 
     def on_mount(self):
         self.push_screen(SourceScreen() if self.skip_welcome else WelcomeScreen())

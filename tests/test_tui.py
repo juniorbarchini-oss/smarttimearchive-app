@@ -213,6 +213,11 @@ class TestTui(unittest.IsolatedAsyncioTestCase):
 @unittest.skipUnless(HAVE_TEXTUAL, "textual not installed (see README: terminal UI)")
 class TestDestinationStep(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        from unittest import mock
+
+        patch = mock.patch.object(tui.privileges, "has_ticket", return_value=False)
+        patch.start()
+        self.addCleanup(patch.stop)
         self._tick = tui.WelcomeScreen.TICK
         tui.WelcomeScreen.TICK = 0.001
         self.tmp = tempfile.mkdtemp(prefix="sta_tui_")
@@ -363,6 +368,23 @@ class TestPrivileges(unittest.TestCase):
 
         self.assertFalse(privileges.has_ticket(missing))
 
+    def test_ask_sends_the_password_through_stdin_never_argv(self):
+        from types import SimpleNamespace as R
+
+        from sta.tui import privileges
+
+        seen = {}
+
+        def fake(cmd, **kw):
+            seen.update(cmd=cmd, **kw)
+            return R(returncode=0)
+
+        self.assertTrue(privileges.ask("s3cret", run=fake))
+        self.assertNotIn("s3cret", " ".join(seen["cmd"]))
+        self.assertEqual(seen["input"], "s3cret\n")
+        self.assertEqual(seen["cmd"][:3], ["sudo", "-S", "-v"])
+        self.assertFalse(privileges.ask("x", run=lambda *a, **k: R(returncode=1)))
+
     def test_keepalive_renews_and_stops(self):
         import time
 
@@ -382,33 +404,64 @@ class TestPrivileges(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_TEXTUAL, "textual not installed")
 class TestPasswordScreen(unittest.IsolatedAsyncioTestCase):
-    async def _run(self, ticket, accepted):
+    async def open(self, accepted, go):
         from unittest import mock
 
         app = tui.StaApp(skip_welcome=True)
         app.source, app.dest_path = fake_found()[0][1], "/tmp/x"
-        asked = []
-        app.ask_password = lambda: asked.append(1) or accepted
-        async with app.run_test(size=(120, 40)) as pilot:
-            app.push_screen(tui.PasswordScreen())
+        given = []
+        state = {"ticket": False}
+
+        def ask(pw):
+            given.append(pw)
+            state["ticket"] = accepted
+            return accepted
+
+        app.ask_password = ask
+        with mock.patch.object(
+            tui.privileges, "has_ticket", side_effect=lambda *a: state["ticket"]
+        ):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.push_screen(tui.PasswordScreen())
+                await pilot.pause(0.3)
+                await go(app, pilot, given)
+
+    async def type_password(self, pilot, text):
+        await pilot.press(*text, "enter")
+        await pilot.pause(0.5)
+
+    async def test_typed_inside_the_tui_masked_and_handed_over_once(self):
+        async def go(app, pilot, given):
+            field = app.screen.query_one("#pw", tui.Input)
+            self.assertTrue(field.password, "what is typed must be masked")
+            # letters that are also key bindings elsewhere must go into the field, not act
+            await self.type_password(pilot, "aqmyc")
+            self.assertEqual(given, ["aqmyc"])
+            self.assertIsInstance(app.screen, tui.ScanScreen)
+
+        await self.open(True, go)
+
+    async def test_wrong_password_says_so_and_lets_the_user_try_again(self):
+        async def go(app, pilot, given):
+            await self.type_password(pilot, "nope")
+            self.assertIsInstance(app.screen, tui.PasswordScreen)
+            self.assertIn("not accepted", str(app.screen.query_one("#result").render()))
+            field = app.screen.query_one("#pw", tui.Input)
+            self.assertEqual(field.value, "", "the wrong password is not left on screen")
+            self.assertFalse(field.disabled)
+
+        await self.open(False, go)
+
+    async def test_empty_enter_does_nothing_and_esc_goes_back(self):
+        async def go(app, pilot, given):
+            await pilot.press("enter")
             await pilot.pause(0.2)
-            with mock.patch.object(tui.privileges, "has_ticket", side_effect=ticket):
-                with mock.patch.object(type(app), "suspend", mock.MagicMock()):
-                    await pilot.press("enter")
-                    await pilot.pause(0.3)
-            return type(app.screen).__name__, asked
+            self.assertEqual(given, [])
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            self.assertNotIsInstance(app.screen, tui.PasswordScreen)
 
-    async def test_existing_ticket_skips_the_prompt(self):
-        name, asked = await self._run([True], True)
-        self.assertEqual((name, asked), ("ScanScreen", []))
-
-    async def test_password_accepted_moves_on(self):
-        name, asked = await self._run([False, True], True)
-        self.assertEqual((name, len(asked)), ("ScanScreen", 1))
-
-    async def test_wrong_or_cancelled_password_stays_and_lets_the_user_retry(self):
-        name, asked = await self._run([False], False)
-        self.assertEqual((name, len(asked)), ("PasswordScreen", 1))
+        await self.open(True, go)
 
 
 class FakeEngine:
@@ -596,12 +649,17 @@ class TestCopyScreen(unittest.IsolatedAsyncioTestCase):
         app.destination = Destination("USB", "/tmp/x", "exfat", 1, False)
         app.make_engine = FakeEngine
         asked = []
-        app.ask_password = lambda: asked.append(1) or True
+        state = {"ok": ticket is True}
+
+        def ask(password):
+            asked.append(password)
+            state["ok"] = True
+            return True
+
+        app.ask_password = ask
         with mock.patch.dict(os.environ, {"TMUX": tmux}), mock.patch.object(
-            tui.privileges, "has_ticket", side_effect=lambda *a: ticket
-        ), mock.patch.object(tui.privileges.Keepalive, "start"), mock.patch.object(
-            type(app), "suspend", mock.MagicMock()
-        ):
+            tui.privileges, "has_ticket", side_effect=lambda *a: state["ok"]
+        ), mock.patch.object(tui.privileges.Keepalive, "start"):
             async with app.run_test(size=(120, 40)) as pilot:
                 app.push_screen(tui.CopyScreen())
                 await pilot.pause(0.4)
@@ -680,14 +738,30 @@ class TestCopyScreen(unittest.IsolatedAsyncioTestCase):
 
         await self.open(go)
 
-    async def test_expired_ticket_asks_again_and_never_starts_silently(self):
+    async def test_expired_ticket_asks_in_a_popup_and_starts_only_after_it(self):
         async def go(app, pilot, asked):
             await pilot.press("y")
-            await pilot.pause(0.2)
-            self.assertEqual(len(asked), 1)
-            self.assertEqual(FakeEngine.instances, [], "no valid ticket after asking: no start")
+            await pilot.pause(0.3)
+            self.assertIsInstance(app.screen, tui.PasswordModal)
+            self.assertEqual(FakeEngine.instances, [], "nothing starts without authorization")
+            await pilot.press(*"secret", "enter")
+            await pilot.pause(0.6)
+            self.assertEqual(asked, ["secret"])
+            self.assertIsInstance(app.screen, tui.CopyScreen)
+            self.assertEqual(len(FakeEngine.instances), 1)
 
-        await self.open(go, ticket=False)
+        await self.open(go, ticket="expired")
+
+    async def test_cancelling_the_popup_starts_nothing(self):
+        async def go(app, pilot, asked):
+            await pilot.press("y")
+            await pilot.pause(0.3)
+            await pilot.press("escape")
+            await pilot.pause(0.3)
+            self.assertIsInstance(app.screen, tui.CopyScreen)
+            self.assertEqual((asked, FakeEngine.instances), ([], []))
+
+        await self.open(go, ticket="expired")
 
 
 class TestEngineCommand(unittest.TestCase):
