@@ -234,6 +234,37 @@ def cache_dir():
     return os.path.join(home, "Library", "Caches", "sta")
 
 
+def _cache_files(cdir):
+    """Only our scan files: the folder may also hold a fallback report, which is not cache."""
+    try:
+        return [
+            os.path.join(cdir, n) for n in os.listdir(cdir) if n.endswith((".db", ".db.tmp"))
+        ]
+    except OSError:
+        return []
+
+
+def cache_size(cdir=None):
+    """Bytes the scan cache takes on disk."""
+    total = 0
+    for path in _cache_files(cdir or cache_dir()):
+        with contextlib.suppress(OSError):
+            total += os.path.getsize(path)
+    return total
+
+
+def clear_cache(cdir=None):
+    """Deletes the scan cache (it is only a speed-up: the next scan rebuilds it). Returns bytes freed."""
+    cdir = cdir or cache_dir()
+    freed = cache_size(cdir)
+    for path in _cache_files(cdir):
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+    with contextlib.suppress(OSError):
+        os.rmdir(cdir)  # only succeeds when nothing else is left in it
+    return freed
+
+
 def _opts_key(opts):
     if not (opts.users or opts.folders or opts.excludes):
         return "full"

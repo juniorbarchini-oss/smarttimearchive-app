@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import errno
 import os
@@ -8,7 +10,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from sta import core  # noqa: E402
+from sta import cli, core  # noqa: E402
 
 
 def write(path, text):
@@ -333,3 +335,47 @@ class TestDiskFull(Fixture):
         self.assertEqual(len(seen), 2)
         self.assertTrue(seen[1].startswith(os.path.join(self.tmp, "cache")))
         self.assertTrue(os.path.exists(ext.report["report_file"]))
+
+
+class TestScanCache(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self.dir = os.path.join(tempfile.mkdtemp(prefix="sta_cache_"), "sta")
+        os.makedirs(self.dir)
+
+    def tearDown(self):
+        shutil.rmtree(os.path.dirname(self.dir), ignore_errors=True)
+
+    def put(self, name, size):
+        with open(os.path.join(self.dir, name), "wb") as f:
+            f.write(b"x" * size)
+
+    def test_size_and_clear_touch_only_scan_files_never_a_fallback_report(self):
+        self.put("aa_full.db", 1000)
+        self.put("bb_full.db.tmp", 500)
+        self.put("report_20260920-101010.txt", 50)
+        self.assertEqual(core.cache_size(self.dir), 1500)
+        self.assertEqual(core.clear_cache(self.dir), 1500)
+        self.assertEqual(os.listdir(self.dir), ["report_20260920-101010.txt"])
+        self.assertEqual(core.cache_size(self.dir), 0)
+
+    def test_clear_removes_the_empty_folder_and_is_harmless_when_missing(self):
+        self.put("aa_full.db", 10)
+        core.clear_cache(self.dir)
+        self.assertFalse(os.path.exists(self.dir))
+        self.assertEqual(core.clear_cache(self.dir), 0)
+        self.assertEqual(core.cache_size(self.dir), 0)
+
+    def test_cli_cache_shows_and_clears(self):
+        from unittest import mock
+
+        self.put("aa_full.db", 2_000_000)
+        out = io.StringIO()
+        with mock.patch.object(core, "cache_dir", return_value=self.dir), \
+                contextlib.redirect_stdout(out):  # fmt: skip
+            self.assertEqual(cli.main(["cache"]), 0)
+            self.assertIn("Scan cache: 0.00 GB", out.getvalue())
+            self.assertTrue(os.path.exists(os.path.join(self.dir, "aa_full.db")), "show only")
+            self.assertEqual(cli.main(["cache", "--clear"]), 0)
+        self.assertFalse(os.path.exists(self.dir))

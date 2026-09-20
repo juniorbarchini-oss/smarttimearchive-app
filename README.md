@@ -52,6 +52,10 @@ scan cache and never touches your archives).
 - **Terminal:** `sta` opens the UI; `sta --tmux` runs it inside `tmux` so a long copy survives a
   closed window (if `tmux` is missing it says so and runs without it).
 - **Engine commands:** `sta plan | extract | verify | list ...` (see below).
+- **Scan cache:** the scan of each backup is kept in `~/Library/Caches/sta` so the next run is
+  fast (it can reach several GB for a large history). Press `d` on the first screen or the final
+  one to delete it (it asks first), or use `sta cache` to see its size and `sta cache --clear` to
+  delete it. It is only a speed-up: deleting it never affects your archives.
 
 A guided, retro-green wizard: source, backups, destination, administrator password, scan, copy,
 report (with an optional verification). It runs as your user and uses `sudo` only for the engine.

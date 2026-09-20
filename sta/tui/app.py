@@ -110,10 +110,14 @@ class WelcomeScreen(Screen):
 class SourceScreen(Screen):
     BINDINGS = [
         ("r", "rescan", "Rescan disks"),
+        ("d", "cache", "Clear scan cache"),
         ("a", "about", "About"),
         ("question_mark", "help", "Help"),
         ("q", "app.quit", "Quit"),
     ]
+
+    def action_cache(self):
+        self.app.push_screen(CacheModal())
 
     def compose(self) -> ComposeResult:
         yield StepBar(1)
@@ -494,6 +498,35 @@ class FolderScreen(Screen):
         if dates and not image:  # an image is always a new one: nothing to skip inside it
             self.notify(f"An archive is already here ({len(dates)} dates): those are skipped.")
         self.app.push_screen(ScanScreen() if privileges.has_ticket() else PasswordScreen())
+
+
+class CacheModal(ModalScreen):
+    """Offers to delete the scan cache. It only speeds up the next scan: never touches archives."""
+
+    BINDINGS = [("y", "yes", "Yes"), ("n", "no", "No"), ("escape", "no", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        size = core.cache_size()
+        with Vertical(classes="dialog-box"):
+            yield Static("Scan cache", classes="dialog-title")
+            if size:
+                yield Static(
+                    f"\nThe scan cache takes {fmt_bytes(size)}.\n"
+                    "It only makes the next scan faster and can be rebuilt at any time.\n"
+                    "Your archives are not touched.\n\n"
+                    "Delete it?  y = yes   n = no",
+                    markup=False,
+                )
+            else:
+                yield Static("\nThere is no scan cache: nothing to delete.\n\nEsc closes.")
+
+    def action_yes(self):
+        if core.cache_size():
+            self.app.notify(f"Deleted the scan cache ({fmt_bytes(core.clear_cache())} freed).")
+        self.dismiss(True)
+
+    def action_no(self):
+        self.dismiss(False)
 
 
 class PasswordEntry:
@@ -951,7 +984,7 @@ class CopyScreen(ScanScreen):
 class ReportScreen(ScanScreen):
     """Step 6: the outcome, and an optional verification. The user decides; it can take a while."""
 
-    BINDINGS = ScanScreen.BINDINGS + [("m", "restart", "Start over")]
+    BINDINGS = ScanScreen.BINDINGS + [("m", "restart", "Start over"), ("d", "cache", "Clear cache")]
     STEP = 6
     TITLE = "Report"
     NOUN = "verification"
@@ -982,6 +1015,12 @@ class ReportScreen(ScanScreen):
         if f.get("image"):
             lines.append(f"Image:    {f['image']}")
         lines.append(f"Report:   {f.get('report_file')}")
+        cache = core.cache_size()
+        if cache:
+            lines.append(
+                f"\nThe scan cache takes {fmt_bytes(cache)}. Press d to delete it if you will not "
+                "use the tool again soon."
+            )
         return lines
 
     def _ask(self, _pending=0):
@@ -1026,6 +1065,10 @@ class ReportScreen(ScanScreen):
 
     def action_next(self):
         pass
+
+    def action_cache(self):
+        if self.state not in ("running", "cancelling"):
+            self.app.push_screen(CacheModal(), lambda _: self._paint())
 
     def action_restart(self):
         if self.state in self.ENDS:  # never while a verification is running

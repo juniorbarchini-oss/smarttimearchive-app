@@ -908,3 +908,82 @@ class TestReportScreen(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Every file matches", text)
 
         await self.open(go)
+
+
+@unittest.skipUnless(HAVE_TEXTUAL, "textual not installed")
+class TestCacheControl(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from unittest import mock
+
+        self.tmp = tempfile.mkdtemp(prefix="sta_tuicache_")
+        self.cdir = os.path.join(self.tmp, "sta")
+        os.makedirs(self.cdir)
+        patch = mock.patch.object(tui.core, "cache_dir", return_value=self.cdir)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def fill(self, size=3_000_000_000 // 1000):
+        with open(os.path.join(self.cdir, "aa_full.db"), "wb") as f:
+            f.write(b"x" * size)
+
+    def cached(self):
+        return os.path.exists(os.path.join(self.cdir, "aa_full.db"))
+
+    async def test_d_on_the_first_screen_asks_shows_the_size_and_only_deletes_on_yes(self):
+        self.fill()
+        app = tui.StaApp(discover=fake_found, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.5)
+            await pilot.press("d")
+            await pilot.pause(0.3)
+            self.assertIsInstance(app.screen, tui.CacheModal)
+            text = " ".join(str(w.render()) for w in app.screen.query("Static"))
+            self.assertIn("3.0 MB", text)
+            await pilot.press("n")
+            await pilot.pause(0.3)
+            self.assertTrue(self.cached(), "no is no")
+            await pilot.press("d", "y")
+            await pilot.pause(0.3)
+            self.assertFalse(self.cached())
+            self.assertIsInstance(app.screen, tui.SourceScreen)
+
+    async def test_nothing_to_delete_says_so(self):
+        app = tui.StaApp(discover=fake_found, skip_welcome=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.5)
+            await pilot.press("d")
+            await pilot.pause(0.3)
+            text = " ".join(str(w.render()) for w in app.screen.query("Static"))
+            self.assertIn("nothing to delete", text)
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.SourceScreen)
+
+    async def test_final_screen_hints_at_the_cache_and_d_works_there_but_not_while_running(self):
+        from unittest import mock
+
+        self.fill()
+        FakeEngine.instances = []
+        app = tui.StaApp(skip_welcome=True)
+        app.source, app.dest_path = fake_found()[0][1], "/tmp/x"
+        app.make_engine = FakeEngine
+        fin = {"event": "finished", "status": "COMPLETED", "report_file": "/r.txt"}
+        with mock.patch.object(tui.privileges.Keepalive, "start"), mock.patch.object(
+            tui.privileges, "has_ticket", return_value=True
+        ):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.push_screen(tui.ReportScreen(fin, 1, 0, 0, 1))
+                await pilot.pause(0.4)
+                body = lambda: str(app.screen.query_one("#body").render())  # noqa: E731
+                self.assertIn("Press d to delete it", body())
+                await pilot.press("y")  # start verifying: d must be ignored now
+                await pilot.press("d")
+                await pilot.pause(0.2)
+                self.assertIsInstance(app.screen, tui.ReportScreen)
+                self.assertTrue(self.cached())
+                await asyncio.to_thread(FakeEngine.instances[0].on_exit, 130, [])
+                await pilot.pause(0.2)
+                await pilot.press("d", "y")
+                await pilot.pause(0.3)
+                self.assertFalse(self.cached())

@@ -79,6 +79,8 @@ def _parser():
     vp.add_argument(
         "--json", action="store_true", help="machine-readable output, one JSON object per line"
     )
+    cp = sub.add_parser("cache", help="show, or with --clear delete, the scan cache")
+    cp.add_argument("--clear", action="store_true", help="delete the scan cache")
     ex = sub.add_parser("extract", help="extract snapshots to dated folders")
     common(ex, dest=True)
     ex.add_argument(
@@ -185,6 +187,13 @@ def main(argv=None):
         sys.stdout.reconfigure(line_buffering=True)
     if args.cmd == "verify":
         return _verify(args)
+    if args.cmd == "cache":
+        if args.clear:
+            print(f"Deleted the scan cache ({_gb(core.clear_cache())} freed).")
+        else:
+            size = core.cache_size()
+            print(f"Scan cache: {_gb(size)} in {core.cache_dir()}" if size else "No scan cache.")
+        return 0
     if args.source_type == "apfs" and os.geteuid() != 0:
         sys.exit("Mounting snapshots needs root: run with sudo.")
     if args.source_type == "apfs":
