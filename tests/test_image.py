@@ -1,5 +1,8 @@
+import glob
 import os
+import time
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -94,14 +97,58 @@ class TestImage(Fixture):
     def test_cli_dest_image_end_to_end(self):
         code = cli.main(["extract", self.src, self.dst, "--source-type", "dir", "--dest-image"])
         self.assertEqual(code, 0)
-        img = os.path.join(self.dst, image.IMAGE_NAME)
-        self.assertTrue(os.path.isdir(img))
+        images = glob.glob(os.path.join(self.dst, "SmartTimeArchive_*.sparsebundle"))
+        self.assertEqual(len(images), 1)
+        img = images[0]
         self.assertIsNone(image.attached_mountpoint(img), "image must be detached at the end")
         with image.ImageMount(img) as im:
             self.assertEqual(
                 open(os.path.join(im.mountpoint, "d3", "Users/bob/Documents/edit.txt")).read(),
                 "v3!",
             )
+
+
+    def test_every_copy_gets_its_own_new_image(self):
+        for _ in range(2):
+            self.assertEqual(
+                cli.main(["extract", self.src, self.dst, "--source-type", "dir", "--dest-image"]), 0
+            )
+            time.sleep(1.1)  # names carry the second
+        images = glob.glob(os.path.join(self.dst, "SmartTimeArchive_*.sparsebundle"))
+        self.assertEqual(len(set(images)), 2, "the old image was not reused")
+
+
+class TestImageSizing(unittest.TestCase):
+    def test_capacity_is_90_percent_of_the_free_space_in_whole_mib(self):
+        free = 500 * 1024**3
+        cap = image.image_capacity(free)
+        self.assertEqual(cap % image.MIB, 0)
+        self.assertAlmostEqual(cap / free, 0.90, places=4)
+
+    def test_new_path_never_collides(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            a = image.new_image_path(d, time.localtime(0))
+            os.makedirs(a)
+            b = image.new_image_path(d, time.localtime(0))
+            self.assertNotEqual(a, b)
+            self.assertTrue(b.endswith(".sparsebundle") and "SmartTimeArchive_" in b)
+
+    def test_plan_fits_by_the_image_capacity_not_by_the_raw_free_space(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            conn = core._open_db(os.path.join(d, "s.db"))
+            conn.execute("INSERT INTO files VALUES ('d1','a','f',1,1000,1)")
+            need = core.make_plan(conn, d, via_image=False)["bytes_needed_with_margin"]
+            free = int(need / 0.95)  # raw free is enough, 90% of it is not
+            with mock.patch.object(core, "dest_traits", return_value=(True, False, free)):
+                plan = core.make_plan(conn, d, via_image=True)
+                self.assertFalse(plan["fits"])
+                self.assertEqual(plan["image_capacity"], image.image_capacity(free))
+                self.assertTrue(core.make_plan(conn, d, via_image=False)["fits"])
+            conn.close()
 
 
 class TestImageHdiutilFallback(TestImage):

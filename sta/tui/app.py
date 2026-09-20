@@ -491,7 +491,7 @@ class FolderScreen(Screen):
     def _finish(self, path, image):
         self.app.dest_path, self.app.dest_image = path, image
         dates, _ = discover.existing_archive(path)
-        if dates:
+        if dates and not image:  # an image is always a new one: nothing to skip inside it
             self.notify(f"An archive is already here ({len(dates)} dates): those are skipped.")
         self.app.push_screen(PasswordScreen())
 
@@ -631,6 +631,13 @@ class ScanScreen(Screen):
             self._paint()
 
     def _start(self):
+        if not privileges.has_ticket():  # the sudo ticket may have expired since the last step
+            with self.app.suspend():
+                print("\nSmartTimeArchive needs your administrator password again (asked by sudo).\n")
+                ok = self.app.ask_password()
+            if not (ok and privileges.has_ticket()):
+                self.notify("The password was not accepted: nothing was started.", severity="error")
+                return
         self.state, self.t0 = "running", time.time()
         self.app.plan = None
         self.keepalive = privileges.Keepalive()
@@ -739,6 +746,9 @@ def plan_text(plan):
         f"Free on the destination: {fmt_bytes(free)}",
         "",
     ]
+    if plan.get("image_capacity"):
+        size = fmt_bytes(plan["image_capacity"])
+        lines.insert(-1, f"New disk image size:    {size} (adaptive: it only takes what is written)")
     if plan["fits"]:
         lines.append("It fits.  Enter continues to the copy.  Esc goes back.")
     else:
@@ -764,7 +774,7 @@ class CopyScreen(ScanScreen):
     def __init__(self):
         super().__init__()
         self.awake = False  # the user turns it on; it is never chosen for them
-        self.done_bytes = 0
+        self.done_bytes = self.linked = self.errors = 0
         self.finished = None
         self.tail = []
 
@@ -811,16 +821,6 @@ class CopyScreen(ScanScreen):
             args.append("--yes")  # the user chose "store everything in full" for this disk
         return args
 
-    def _start(self):
-        if not privileges.has_ticket():  # the sudo ticket may have expired since the scan
-            with self.app.suspend():
-                print("\nSmartTimeArchive needs your administrator password again (asked by sudo).\n")
-                ok = self.app.ask_password()
-            if not (ok and privileges.has_ticket()):
-                self.notify("The password was not accepted: nothing was started.", severity="error")
-                return
-        super()._start()
-
     def _event(self, ev):
         kind = ev.get("event")
         p = self.progress
@@ -831,6 +831,8 @@ class CopyScreen(ScanScreen):
             p.update(ev)
         elif kind == "date_done":
             self.done_bytes += ev.get("bytes_copied", 0)
+            self.linked += ev.get("linked", 0)
+            self.errors += ev.get("errors", 0)
             p.update(ev)
             p["bytes_copied"] = 0  # already counted in done_bytes
         elif kind == "image":
@@ -869,7 +871,7 @@ class CopyScreen(ScanScreen):
                 + f"\nStatus: {f['status']}\n"
                 f"Copied: {fmt_bytes(self.done_bytes)}\n"
                 f"Report: {f.get('report_file')}\n\n"
-                "Verifying and the guide to free your disk come in the next step.  Esc goes back."
+                "Enter continues."
             )
             return
         secs = int(time.time() - self.t0)
@@ -894,11 +896,146 @@ class CopyScreen(ScanScreen):
         self._set("\n".join(lines))
 
     def action_back(self):
-        if self.state in ("confirm", "done", "failed", "cancelled"):
+        if self.state in ("confirm", "failed", "cancelled"):
             self.app.pop_screen()
 
     def action_next(self):
+        if self.state == "done":
+            self.app.push_screen(
+                ReportScreen(
+                    self.finished, self.done_bytes, self.linked, self.errors, len(self.app.dates)
+                )
+            )
+
+
+class ReportScreen(ScanScreen):
+    """Step 6: the outcome, and an optional verification. The user decides; it can take a while."""
+
+    BINDINGS = ScanScreen.BINDINGS + [("m", "restart", "Start over")]
+    STEP = 6
+    TITLE = "Report"
+    NOUN = "verification"
+    CANCELLED_TEXT = "Verification cancelled. The copy itself is untouched.  m starts over,  q quits."
+    ENDS = ("skipped", "verified", "failed", "cancelled")
+
+    def __init__(self, finished, copied_bytes, linked, errors, backups):
+        super().__init__()
+        self.finished, self.copied_bytes = finished, copied_bytes
+        self.linked, self.errors, self.backups = linked, errors, backups
+        self.result = None
+
+    def on_mount(self):
+        self.set_interval(1.0, self._refresh)
+        self._ask(0)
+
+    def _summary(self):
+        f = self.finished
+        ok = f["status"] == "COMPLETED"
+        lines = [
+            "The copy finished." if ok else "The copy finished, but some files could not be copied.",
+            f"Status:   {f['status']}",
+            f"Backups:  {self.backups}",
+            f"Copied:   {fmt_bytes(self.copied_bytes)}   ({self.linked:,} files linked, not copied)",
+        ]
+        if self.errors:
+            lines.append(f"Errors:   {self.errors:,} files - the list is in the report")
+        if f.get("image"):
+            lines.append(f"Image:    {f['image']}")
+        lines.append(f"Report:   {f.get('report_file')}")
+        return lines
+
+    def _ask(self, _pending=0):
+        self.state = "confirm"
+        self._paint()
+
+    def _args(self):
+        return ["verify", self.finished.get("image") or self.app.dest_path]
+
+    def _event(self, ev):
+        kind = ev.get("event")
+        if kind == "verify_progress":
+            self.progress.update(ev)
+        elif kind == "verified":
+            self.result = ev
+        elif kind == "error":
+            self.tail = [ev.get("message", "")]
+        self._paint()
+
+    def _exit(self, code, tail):
+        if self.keepalive:
+            self.keepalive.stop()
+        if self.state == "cancelling" or code == 130:
+            self.state = "cancelled"
+        elif self.result:
+            self.state = "verified"
+        else:
+            self.state = "failed"
+            self.tail = self.tail or tail
+        self._paint()
+
+    def action_no(self):
+        if self.state == "confirm":
+            self.state = "skipped"
+            self._paint()
+        elif self.ask_cancel:
+            self.ask_cancel = False
+            self._paint()
+
+    def action_back(self):
         pass
+
+    def action_next(self):
+        pass
+
+    def action_restart(self):
+        if self.state in self.ENDS:  # never while a verification is running
+            self.app.call_later(self.app.restart)
+
+    def _paint(self):
+        st = self.state
+        lines = self._summary()
+        if st == "confirm":
+            lines += [
+                "",
+                "Do you want to verify the copy?",
+                "It re-reads every file and compares it with its checksum. This can take a",
+                "while: a fast SSD with 80 GB took about 4 minutes; a slow or network disk",
+                "can take much longer. You can cancel it with c.",
+                "",
+                "Verify?  y = yes   n = no",
+            ]
+        elif st == "skipped":
+            lines += ["", "Not verified.  m starts over,  q quits."]
+        elif st == "running":
+            p = self.progress
+            secs = int(time.time() - self.t0)
+            lines += ["", f"Verifying...  {secs // 60}:{secs % 60:02d} elapsed"]
+            if p.get("total"):
+                lines.append(f"{p['done']:,} of {p['total']:,} entries checked")
+            lines.append(
+                f"\nCancel the verification?  y = yes   n = no" if self.ask_cancel else "\nc cancels"
+            )
+        elif st == "cancelling":
+            lines += ["", "Cancelling..."]
+        elif st == "cancelled":
+            lines = [self.CANCELLED_TEXT]
+        elif st == "failed":
+            detail = "\n".join(self.tail or ["(no details)"])
+            lines += ["", f"The verification failed.\n{detail}", "", "m starts over,  q quits."]
+        elif st == "verified":
+            r = self.result
+            lines += ["", f"Verification: {r['status']}",
+                      f"{r['hashed']:,} files re-read, {r['entries']:,} entries checked."]  # fmt: skip
+            if r["status"] == "VERIFIED":
+                lines.append("Every file matches its checksum.")
+            else:
+                lines.append(
+                    f"Different: {r['mismatches']}   missing: {r['missing']}   "
+                    f"not readable: {r['unreadable']}"
+                )
+                lines += [f"  {e}" for e in r.get("examples", [])]
+            lines += ["", "m starts over,  q quits."]
+        self._set("\n".join(lines))
 
 
 class StaApp(App):
@@ -919,6 +1056,14 @@ class StaApp(App):
         self.dest_path = None
         self.dest_image = False
         self.plan = None
+
+    def restart(self):
+        """Back to step 1 with nothing carried over (another disk, or more folders elsewhere)."""
+        self.source, self.dates, self.destination = None, [], None
+        self.dest_path, self.dest_image, self.plan = None, False, None
+        while len(self.screen_stack) > 1:
+            self.pop_screen()
+        self.push_screen(SourceScreen())
 
     def scan_source(self, mountpoint):
         return core.ApfsSource(mountpoint)

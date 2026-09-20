@@ -448,7 +448,9 @@ class TestScanScreen(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(
             tui.core, "uncached_dates", return_value=app.dates[:pending]
-        ), mock.patch.object(tui.privileges.Keepalive, "start"):
+        ), mock.patch.object(tui.privileges.Keepalive, "start"), mock.patch.object(
+            tui.privileges, "has_ticket", return_value=True
+        ):
             async with app.run_test(size=(120, 40)) as pilot:
                 app.push_screen(tui.ScanScreen())
                 await pilot.pause(0.4)
@@ -703,3 +705,132 @@ class TestEngineCommand(unittest.TestCase):
         with mock.patch.object(engine.os.path, "exists", return_value=False):
             self.assertNotIn(engine.CAFFEINATE, awake.command())
 
+
+
+@unittest.skipUnless(HAVE_TEXTUAL, "textual not installed")
+class TestReportScreen(unittest.IsolatedAsyncioTestCase):
+    FINISHED = {"event": "finished", "status": "COMPLETED", "report_file": "/r.txt"}
+
+    async def open(self, pilot_fn, finished=None, errors=0):
+        from unittest import mock
+
+        FakeEngine.instances = []
+        app = tui.StaApp(skip_welcome=True)
+        app.source = fake_found()[0][1]
+        app.dest_path = "/Volumes/X/test"
+        app.make_engine = FakeEngine
+        with mock.patch.object(tui.privileges.Keepalive, "start"), mock.patch.object(
+            tui.privileges, "has_ticket", return_value=True
+        ):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.push_screen(
+                    tui.ReportScreen(finished or self.FINISHED, 79_500_000_000, 203_000, errors, 2)
+                )
+                await pilot.pause(0.4)
+                await pilot_fn(app, pilot)
+
+    def body(self, app):
+        return str(app.screen.query_one("#body").render())
+
+    async def test_summary_then_asks_and_warns_about_time_and_starts_nothing(self):
+        async def go(app, pilot):
+            text = self.body(app)
+            for part in ("COMPLETED", "79.5 GB", "/r.txt", "can take a", "y = yes"):
+                self.assertIn(part, text)
+            await pilot.press("c", "enter", "escape")
+            self.assertEqual(FakeEngine.instances, [], "nothing runs until the user says yes")
+            self.assertIsInstance(app.screen, tui.ReportScreen)
+
+        await self.open(go)
+
+    async def test_no_skips_and_says_not_verified(self):
+        async def go(app, pilot):
+            await pilot.press("n")
+            self.assertIn("Not verified", self.body(app))
+            self.assertEqual(FakeEngine.instances, [])
+
+        await self.open(go)
+
+    async def test_m_starts_over_only_when_nothing_is_running(self):
+        async def go(app, pilot):
+            await pilot.press("m")  # asked to verify: not an end state yet
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.ReportScreen)
+            await pilot.press("n", "m")
+            await pilot.pause(0.6)
+            self.assertIsInstance(app.screen, tui.SourceScreen)
+            self.assertEqual(
+                (app.source, app.dates, app.dest_path, app.plan), (None, [], None, None)
+            )
+            self.assertEqual(len(app.screen_stack), 2, "no stale screens left behind")
+
+        await self.open(go)
+
+    async def test_m_is_ignored_while_verifying(self):
+        async def go(app, pilot):
+            await pilot.press("y", "m")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.ReportScreen)
+
+        await self.open(go)
+
+    async def test_errors_are_reported_not_hidden(self):
+        async def go(app, pilot):
+            self.assertIn("could not be copied", self.body(app))
+            self.assertIn("12 files", self.body(app))
+
+        await self.open(
+            go, dict(self.FINISHED, status="COMPLETED_WITH_ERRORS"), errors=12
+        )
+
+    async def test_verify_runs_shows_progress_and_a_clean_result(self):
+        async def go(app, pilot):
+            await pilot.press("y")
+            eng = FakeEngine.instances[0]
+            self.assertEqual(eng.args, ["verify", "/Volumes/X/test"])
+            await asyncio.to_thread(
+                eng.on_event, {"event": "verify_progress", "done": 40, "total": 100}
+            )
+            await pilot.pause(0.2)
+            self.assertIn("40 of 100", self.body(app))
+            await asyncio.to_thread(
+                eng.on_event,
+                {"event": "verified", "status": "VERIFIED", "entries": 100, "hashed": 60,
+                 "mismatches": 0, "missing": 0, "unreadable": 0, "no_checksum": 0},
+            )  # fmt: skip
+            await asyncio.to_thread(eng.on_exit, 0, [])
+            await pilot.pause(0.2)
+            self.assertIn("Every file matches", self.body(app))
+
+        await self.open(go)
+
+    async def test_verify_problems_are_listed_and_cancel_works(self):
+        async def go(app, pilot):
+            await pilot.press("y", "c", "n")  # cancel asked, then declined: keeps going
+            self.assertNotIn("cancel", FakeEngine.instances[0].calls)
+            await pilot.press("c", "y")
+            self.assertIn("cancel", FakeEngine.instances[0].calls)
+            await asyncio.to_thread(FakeEngine.instances[0].on_exit, 130, [])
+            await pilot.pause(0.2)
+            self.assertIn("Verification cancelled", self.body(app))
+
+        await self.open(go)
+
+    async def test_differences_are_shown(self):
+        async def go(app, pilot):
+            await pilot.press("y")
+            eng = FakeEngine.instances[0]
+            await asyncio.to_thread(
+                eng.on_event,
+                {"event": "verified", "status": "FAILED", "entries": 100, "hashed": 60,
+                 "mismatches": 2, "missing": 1, "unreadable": 0, "no_checksum": 0,
+                 "examples": ["2026-08-23-203105/Users/a/b.txt"]},
+            )  # fmt: skip
+            await asyncio.to_thread(eng.on_exit, 1, [])
+            await pilot.pause(0.2)
+            text = self.body(app)
+            self.assertIn("Different: 2", text)
+            self.assertIn("b.txt", text)
+            self.assertNotIn("Every file matches", text)
+
+        await self.open(go)

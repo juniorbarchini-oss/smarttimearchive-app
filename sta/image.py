@@ -19,6 +19,7 @@ from .util import own, own_tree
 IMAGE_NAME = "SmartTimeArchive.sparsebundle"
 VOLUME_NAME = "SmartTimeArchive"
 MIB = 1024 * 1024
+CAPACITY_FRACTION = 0.90
 USE_DISKUTIL = None  # None = detect; tests can force True/False
 
 
@@ -46,9 +47,21 @@ def _diskutil_image_available():
     return USE_DISKUTIL
 
 
-def image_size_for(bytes_needed_with_margin):
-    """Maximum size of the virtual disk: the plan plus 10% and 1 GiB. It only grows on demand."""
-    return int(bytes_needed_with_margin * 1.10) + 1024 * MIB
+def image_capacity(free_bytes):
+    """Size of a new image: 90% of the free space of the disk it lives on (10% kept as a safety
+    margin). The image is sparse, so it only takes what is really written into it."""
+    return int(free_bytes * CAPACITY_FRACTION) // MIB * MIB
+
+
+def new_image_path(dest, now=None):
+    """A path for a brand-new image: every copy gets its own, an existing one is never reused."""
+    stamp = time.strftime("%Y%m%d-%H%M%S", now or time.localtime())
+    path = os.path.join(dest, f"SmartTimeArchive_{stamp}.sparsebundle")
+    n = 2
+    while os.path.exists(path):
+        path = os.path.join(dest, f"SmartTimeArchive_{stamp}-{n}.sparsebundle")
+        n += 1
+    return path
 
 
 def _entity(data, hint):

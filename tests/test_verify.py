@@ -71,3 +71,21 @@ class TestVerify(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFindArchiveImages(unittest.TestCase):
+    def test_folder_with_one_or_several_images(self):
+        import tempfile
+
+        from sta import verify
+        from sta.apfs import ApfsError
+
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "SmartTimeArchive_20260920-100000.sparsebundle"))
+            self.assertEqual(
+                verify.find_archive(d)[1],
+                os.path.join(d, "SmartTimeArchive_20260920-100000.sparsebundle"),
+            )
+            os.makedirs(os.path.join(d, "SmartTimeArchive.sparsebundle"))  # an old-style name
+            with self.assertRaises(ApfsError):
+                verify.find_archive(d)

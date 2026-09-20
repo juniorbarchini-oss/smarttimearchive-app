@@ -1,12 +1,13 @@
 """Re-check an extracted archive against its sha256 manifests (read-only)."""
 
+import glob
 import hashlib
 import os
 import time
 
 from .apfs import ApfsError
 from .core import REPORT_DIR, parse_manifest_line
-from .image import IMAGE_NAME, ImageMount
+from .image import ImageMount
 
 VERIFIED = "VERIFIED"
 VERIFIED_WITH_WARNINGS = "VERIFIED_WITH_WARNINGS"
@@ -21,9 +22,11 @@ def find_archive(path):
         return path, None
     if path.endswith(".sparsebundle") and os.path.isdir(path):
         return None, path
-    image = os.path.join(path, IMAGE_NAME)
-    if os.path.isdir(image):
-        return None, image
+    images = sorted(glob.glob(os.path.join(glob.escape(path), "*.sparsebundle")))
+    if len(images) > 1:
+        raise ApfsError(f"several disk images in {path}: point to the one to verify")
+    if images and os.path.isdir(images[0]):
+        return None, images[0]
     raise ApfsError(f"no SmartTimeArchive archive found at {path}")
 
 

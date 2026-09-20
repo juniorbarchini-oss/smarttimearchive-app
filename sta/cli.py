@@ -76,6 +76,9 @@ def _parser():
     vp.add_argument(
         "archive", help="archive folder, .sparsebundle image, or a folder containing one"
     )
+    vp.add_argument(
+        "--json", action="store_true", help="machine-readable output, one JSON object per line"
+    )
     ex = sub.add_parser("extract", help="extract snapshots to dated folders")
     common(ex, dest=True)
     ex.add_argument(
@@ -85,30 +88,38 @@ def _parser():
 
 
 def _verify(args):
+    out = Out(args.json)
+    out.event({"event": "started", "pid": os.getpid()})
     cancelled = []
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: cancelled.append(1))
+
+    def progress(ev):
+        out.event(ev)
+        out.say(f"  {ev['done']:,}/{ev['total']:,} entries, {ev['seconds']:.0f}s")
+
     try:
-        rep = verify.verify_archive(
-            args.archive,
-            emit=lambda ev: print(
-                f"  {ev['done']:,}/{ev['total']:,} entries, {ev['seconds']:.0f}s"
-            ),
-            cancel=lambda: bool(cancelled),
-        )
+        rep = verify.verify_archive(args.archive, emit=progress, cancel=lambda: bool(cancelled))
     except ApfsError as e:
-        sys.exit(f"error: {e}")
-    print(
+        return out.fail(f"error: {e}", code=1)
+    out.say(
         f"Dates: {rep['dates']}   entries: {rep['entries']:,}   files re-hashed: {rep['hashed']:,}\n"
         f"Checksum mismatches: {len(rep['mismatches'])}   missing: {len(rep['missing'])}   "
         f"not readable by this user: {len(rep['unreadable'])}   without checksum: {rep['no_checksum']}"
     )
     for label in ("mismatches", "missing"):
         for date, rel in rep[label][:10]:
-            print(f"  {label.upper()}: {date}/{rel}")
+            out.say(f"  {label.upper()}: {date}/{rel}")
     if rep["unreadable"]:
-        print("(run with sudo to check the permission-protected files too)")
-    print(f"\nStatus: {rep['status']}")
+        out.say("(run with sudo to check the permission-protected files too)")
+    out.say(f"\nStatus: {rep['status']}")
+    out.event({
+        "event": "verified", "status": rep["status"], "dates": rep["dates"],
+        "entries": rep["entries"], "hashed": rep["hashed"], "mismatches": len(rep["mismatches"]),
+        "missing": len(rep["missing"]), "unreadable": len(rep["unreadable"]),
+        "no_checksum": rep["no_checksum"],
+        "examples": [f"{d}/{r}" for d, r in (rep["mismatches"] + rep["missing"])[:5]],
+    })  # fmt: skip
     codes = {verify.VERIFIED: 0, verify.VERIFIED_WITH_WARNINGS: 3, verify.CANCELLED: 130}
     return codes.get(rep["status"], 1)
 
@@ -137,6 +148,14 @@ def _plan_text(plan):
         ),
         f"Destination case-insens: {'yes' if plan['dest_case_insensitive'] else 'no'}",
         f"Destination free:        {_gb(plan['dest_free'])}",
+        *(
+            [
+                f"New disk image size:    {_gb(plan['image_capacity'])}"
+                "  (adaptive: it only takes what is written)"
+            ]
+            if plan["via_image"]
+            else []
+        ),
         f"Space needed (+margin):  {_gb(plan['bytes_needed_with_margin'])}   -> "
         + ("fits" if plan["fits"] else "DOES NOT FIT"),
     ]
@@ -278,9 +297,9 @@ def _run(args, source, dates, opts, work):
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: cancelled.append(1))
     if args.dest_image:
-        img = os.path.join(args.dest, image.IMAGE_NAME)
-        size = image.image_size_for(plan["bytes_needed_with_margin"])
-        out.say(f"Using disk image {img} (max {_gb(size)}, grows as needed)")
+        img = image.new_image_path(args.dest)  # always a new one: an old image is never reused
+        size = plan["image_capacity"]
+        out.say(f"Creating disk image {img} (max {_gb(size)}, grows as needed)")
         out.event({"event": "image", "path": img, "max_bytes": size})
         with image.ImageMount(img, size) as im:
             status, report = _extract(source, im.mountpoint, conn, dates, plan, cancelled, out)
@@ -293,7 +312,8 @@ def _run(args, source, dates, opts, work):
     else:
         status, report = _extract(source, args.dest, conn, dates, plan, cancelled, out)
     out.say(f"\nStatus: {status}\nReport: {report.get('report_file')}")
-    out.event({"event": "finished", "status": status, "report_file": report.get("report_file")})
+    out.event({"event": "finished", "status": status, "report_file": report.get("report_file"),
+               "image": img if args.dest_image else None})  # fmt: skip
     return {core.COMPLETED: 0, core.COMPLETED_WITH_ERRORS: 3, core.CANCELLED: 130}.get(status, 1)
 
 

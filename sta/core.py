@@ -21,8 +21,9 @@ import stat
 import tempfile
 import time
 
-from .util import own as _own
 from .apfs import ApfsError, SnapshotMount, find_data_root, list_snapshots, volume_info
+from .image import image_capacity
+from .util import own as _own
 
 COMPLETED = "COMPLETED"
 COMPLETED_WITH_ERRORS = "COMPLETED_WITH_ERRORS"
@@ -405,6 +406,7 @@ def make_plan(conn, dest, via_image=False):
         links, case_insens = True, False
     needed = unique if links else full
     needed_margin = int(needed * (1 + SPACE_MARGIN)) + SPACE_MARGIN_BYTES
+    capacity = image_capacity(free) if via_image else free
     return {
         "snapshots": q("SELECT COUNT(DISTINCT snap) FROM files").fetchone()[0],
         "files": files,
@@ -416,9 +418,10 @@ def make_plan(conn, dest, via_image=False):
         "via_image": via_image,
         "dest_case_insensitive": case_insens,
         "dest_free": free,
+        "image_capacity": capacity if via_image else None,
         "bytes_needed": needed,
         "bytes_needed_with_margin": needed_margin,
-        "fits": free >= needed_margin,
+        "fits": capacity >= needed_margin,
     }
 
 
@@ -453,6 +456,10 @@ def _sha256(path):
     return h.hexdigest()
 
 
+class DestinationFull(Exception):
+    pass
+
+
 class Extractor:
     def __init__(
         self,
@@ -485,8 +492,11 @@ class Extractor:
                     break
                 self._extract_date(date, openers[date], i)
         except Exception as e:  # unexpected: report, never claim success
-            self.report["fatal"] = f"{type(e).__name__}: {e}"
+            self.report["fatal"] = (
+                str(e) if isinstance(e, DestinationFull) else f"{type(e).__name__}: {e}"
+            )
             self.report["status"] = FAILED
+            self.emit({"event": "error", "message": self.report["fatal"]})
         else:
             if self.cancel():
                 self.report["status"] = CANCELLED
@@ -562,6 +572,10 @@ class Extractor:
                     else:
                         stats["skipped_special"] += 1
                 except OSError as e:
+                    if e.errno == errno.ENOSPC:  # every next file would fail too: stop here
+                        raise DestinationFull(
+                            "The destination is full. The backups already finished are kept."
+                        ) from e
                     stats["errors"].append((rel, e.errno or 0, e.strerror or str(e)))
                     self.log(f"  ERROR {rel}: {e.strerror}")
                 if n % 2000 == 0:
@@ -639,7 +653,17 @@ class Extractor:
         )
 
     def _write_report(self):
-        base = os.path.join(self.dest, REPORT_DIR, "report_" + time.strftime("%Y%m%d-%H%M%S"))
+        name = "report_" + time.strftime("%Y%m%d-%H%M%S")
+        try:
+            self._write_report_to(os.path.join(self.dest, REPORT_DIR, name))
+        except OSError as e:  # e.g. the destination is full: keep the report somewhere else
+            fallback = os.path.join(cache_dir(), name)
+            os.makedirs(os.path.dirname(fallback), exist_ok=True)
+            self._write_report_to(fallback)
+            self.log(f"Report not written on the destination ({e.strerror}); kept in {fallback}")
+
+    def _write_report_to(self, base):
+        self.report["report_file"] = base + ".txt"
         with open(base + ".json", "w") as f:
             json.dump(self.report, f, indent=2)
         _own(base + ".json")
@@ -660,4 +684,3 @@ class Extractor:
                 for rel, err, msg in s["errors"]:
                     f.write(f"  UNREADABLE/FAILED [{err}] {rel}: {msg}\n")
         _own(base + ".txt")
-        self.report["report_file"] = base + ".txt"

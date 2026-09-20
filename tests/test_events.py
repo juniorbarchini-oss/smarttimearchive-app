@@ -49,6 +49,16 @@ class TestEvents(Fixture):
         self.assertEqual(code, 130)
         self.assertEqual(json.loads(text.splitlines()[-1]), {"event": "cancelled"})
 
+    def test_verify_json_reports_progress_and_a_final_result(self):
+        self.run_cli("extract", self.src, self.dst, "--source-type", "dir", "--json")
+        code, text = self.run_cli("verify", self.dst, "--json")
+        events = [json.loads(ln) for ln in text.splitlines()]
+        self.assertEqual(events[0]["event"], "started")
+        final = events[-1]
+        self.assertEqual((final["event"], final["status"]), ("verified", "VERIFIED"))
+        self.assertEqual(final["mismatches"], 0)
+        self.assertEqual(code, 0)
+
     def test_json_mode_is_pure_json_lines(self):
         code, text = self.run_cli("extract", self.src, self.dst, "--source-type", "dir", "--json")
         self.assertEqual(code, 0)

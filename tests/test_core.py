@@ -1,4 +1,5 @@
 import json
+import errno
 import os
 import shutil
 import subprocess
@@ -281,3 +282,54 @@ class TestPlan(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDiskFull(Fixture):
+    def test_enospc_stops_at_once_says_why_and_still_keeps_a_report(self):
+        from unittest import mock
+
+        events = []
+        conn, _ = core.scan(self.source, self.dates, core.Options(),
+                            os.path.join(self.tmp, "f.db"), log=lambda *_: None,
+                            use_cache=False)  # fmt: skip
+        calls = []
+
+        def full(*a, **k):
+            calls.append(1)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        ext = core.Extractor(self.source, self.dst, conn, self.dates, log=lambda *_: None,
+                             emit=events.append)  # fmt: skip
+        with mock.patch.object(core, "_copy_with_retry", side_effect=full), mock.patch.object(
+            core, "_copyfile", side_effect=full
+        ):
+            status = ext.run()
+        self.assertEqual(status, core.FAILED)
+        self.assertEqual(len(calls), 1, "no more attempts once the disk is full")
+        self.assertIn("destination is full", ext.report["fatal"])
+        self.assertTrue(any(e["event"] == "error" and "full" in e["message"] for e in events))
+        self.assertTrue(os.path.exists(ext.report["report_file"]))
+
+    def test_report_falls_back_when_the_destination_cannot_take_it(self):
+        from unittest import mock
+
+        conn, _ = core.scan(self.source, self.dates, core.Options(),
+                            os.path.join(self.tmp, "g.db"), log=lambda *_: None,
+                            use_cache=False)  # fmt: skip
+        ext = core.Extractor(self.source, self.dst, conn, self.dates[:1], log=lambda *_: None)
+        real = ext._write_report_to
+        seen = []
+
+        def flaky(base):
+            seen.append(base)
+            if len(seen) == 1:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(base)
+
+        with mock.patch.object(ext, "_write_report_to", side_effect=flaky), mock.patch.object(
+            core, "cache_dir", return_value=os.path.join(self.tmp, "cache")
+        ):
+            ext.run()
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(seen[1].startswith(os.path.join(self.tmp, "cache")))
+        self.assertTrue(os.path.exists(ext.report["report_file"]))
