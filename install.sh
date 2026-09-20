@@ -69,7 +69,7 @@ $SUDO rsync -a --exclude '__pycache__' --exclude '*.pyc' "$here/sta" "$lib/"
 $SUDO cp "$here/requirements.txt" "$lib/requirements.txt"
 $SUDO "$py" -m venv "$lib/venv"
 say "Fetching the terminal UI library (Textual) ..."
-$SUDO "$lib/venv/bin/python" -m pip install --quiet --disable-pip-version-check \
+$SUDO "$lib/venv/bin/python" -m pip install --quiet --disable-pip-version-check --no-cache-dir \
   -r "$lib/requirements.txt"
 version_app="$(PYTHONPATH="$lib" "$lib/venv/bin/python" -c 'import sta; print(sta.__version__)')"
 printf '%s\n' "$version_app" | $SUDO tee "$marker" >/dev/null
@@ -140,6 +140,15 @@ $SUDO touch "$app"
 
 $SUDO cp "$here/uninstall.sh" "$lib/uninstall.sh"
 $SUDO chmod 755 "$lib/uninstall.sh"
+
+# The engine runs as administrator: nothing in it may belong to (or be writable by) a normal user.
+# (rsync -a copies the owner of the source files, so this must be enforced explicitly.)
+if [ -n "$SUDO" ]; then
+  $SUDO chown -R root:wheel "$lib" "$bin" "$app"
+  $SUDO chmod -R go-w "$lib" "$bin" "$app"
+  bad="$(find "$lib" "$bin" \( ! -user root -o -perm -0002 -o -perm -0020 \) 2>/dev/null | head -1)"
+  [ -z "$bad" ] || die "internal check failed: $bad is not owned only by root."
+fi
 
 say ""
 say "SmartTimeArchive $version_app is installed."
