@@ -12,7 +12,7 @@ from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 
 from .. import AUTHOR, DISCLAIMER, REPO, SUPPORT, __version__, discover
-from . import art
+from . import art, privileges
 
 STEPS = ["Source", "Backups", "Destination", "Scan", "Run", "Report"]
 
@@ -216,7 +216,8 @@ class AboutScreen(ModalScreen):
                 f"\nCreated by {AUTHOR}\n"
                 "Built together with Claude (Anthropic), using Claude Code\n\n"
                 f"{REPO}\nSupport the project: {SUPPORT}\n\n"
-                f"{DISCLAIMER}\n\n[Esc] close"
+                f"{DISCLAIMER}\n\n[Esc] close",
+                markup=False,
             )
 
 
@@ -380,7 +381,8 @@ class ImageChoice(ModalScreen):
                 "An APFS disk image created inside this folder keeps the space savings.\n\n"
                 "[y] create the disk image (recommended)\n"
                 "[n] store everything in full\n"
-                "[Esc] go back"
+                "[Esc] go back",
+                markup=False,  # otherwise Textual eats "[y]" as a style tag
             )
 
     def action_yes(self):
@@ -491,7 +493,45 @@ class FolderScreen(Screen):
         dates, _ = discover.existing_archive(path)
         if dates:
             self.notify(f"An archive is already here ({len(dates)} dates): those are skipped.")
-        self.app.push_screen(ScanScreen())
+        self.app.push_screen(PasswordScreen())
+
+
+class PasswordScreen(Screen):
+    """Step 4a: explain why administrator access is needed, then let sudo ask for it."""
+
+    BINDINGS = [
+        ("enter", "continue", "Continue"),
+        ("escape", "app.pop_screen", "Back"),
+        ("q", "app.quit", "Quit"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield StepBar(4)
+        yield Static("Administrator access", classes="heading")
+        yield Static(
+            "The engine needs your administrator password to mount the Time Machine\n"
+            "snapshots and to read every user's files.\n\n"
+            "  - This program keeps running as your normal user.\n"
+            "  - macOS asks for the password itself; this program never sees or stores it.\n"
+            "  - Nothing is written to, or deleted from, your Time Machine disk.\n"
+            "  - You can cancel or go back at any moment.",
+            classes="dim",
+        )
+        yield Static("", id="result", classes="note")
+        yield Footer()
+
+    def action_continue(self):
+        result = self.query_one("#result", Static)
+        if privileges.has_ticket():
+            self.app.push_screen(ScanScreen())
+            return
+        with self.app.suspend():
+            print("\nSmartTimeArchive needs your administrator password (asked by sudo).\n")
+            ok = self.app.ask_password()
+        if ok and privileges.has_ticket():
+            self.app.push_screen(ScanScreen())
+        else:
+            result.update("The password was not accepted or was cancelled. Press Enter to try again.")
 
 
 class ScanScreen(Screen):
@@ -530,6 +570,9 @@ class StaApp(App):
         self.destination = None
         self.dest_path = None
         self.dest_image = False
+
+    def ask_password(self):
+        return privileges.ask()
 
     def on_mount(self):
         self.push_screen(SourceScreen() if self.skip_welcome else WelcomeScreen())

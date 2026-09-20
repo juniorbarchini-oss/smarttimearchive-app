@@ -274,7 +274,7 @@ class TestDestinationStep(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(app.screen, tui.FolderScreen)
             await pilot.press("u")
             await pilot.pause(0.3)
-            self.assertIsInstance(app.screen, tui.ScanScreen)
+            self.assertIsInstance(app.screen, tui.PasswordScreen)
             self.assertEqual(app.dest_path, self.fast)
             self.assertFalse(app.dest_image)
 
@@ -290,9 +290,12 @@ class TestDestinationStep(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(120, 40)) as pilot:
             await self.open_stick(pilot)
             self.assertIsInstance(app.screen, tui.ImageChoice)
+            shown = " ".join(str(w.render()) for w in app.screen.query("Static"))
+            for key in ("[y]", "[n]", "[Esc]"):
+                self.assertIn(key, shown, "the keys must be visible, not eaten as markup")
             await pilot.press("y")
             await pilot.pause(0.3)
-            self.assertIsInstance(app.screen, tui.ScanScreen)
+            self.assertIsInstance(app.screen, tui.PasswordScreen)
             self.assertEqual((app.dest_path, app.dest_image), (self.stick, True))
 
     async def test_no_hard_links_user_may_refuse_the_image(self):
@@ -301,7 +304,7 @@ class TestDestinationStep(unittest.IsolatedAsyncioTestCase):
             await self.open_stick(pilot)
             await pilot.press("n")
             await pilot.pause(0.3)
-            self.assertIsInstance(app.screen, tui.ScanScreen)
+            self.assertIsInstance(app.screen, tui.PasswordScreen)
             self.assertEqual((app.dest_path, app.dest_image), (self.stick, False))
 
     async def test_escape_in_the_image_question_goes_back_without_choosing(self):
@@ -343,3 +346,65 @@ class TestDestinationStep(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPrivileges(unittest.TestCase):
+    def test_has_ticket_follows_sudo_n(self):
+        from types import SimpleNamespace as R
+
+        from sta.tui import privileges
+
+        self.assertTrue(privileges.has_ticket(lambda *a, **k: R(returncode=0)))
+        self.assertFalse(privileges.has_ticket(lambda *a, **k: R(returncode=1)))
+
+        def missing(*a, **k):
+            raise OSError
+
+        self.assertFalse(privileges.has_ticket(missing))
+
+    def test_keepalive_renews_and_stops(self):
+        import time
+
+        from sta.tui import privileges
+
+        calls = []
+        ka = privileges.Keepalive(run=lambda cmd, **k: calls.append(cmd), interval=0.01)
+        ka.start()
+        time.sleep(0.1)
+        ka.stop()
+        n = len(calls)
+        time.sleep(0.1)
+        self.assertGreaterEqual(n, 2)
+        self.assertEqual(calls[0], ["sudo", "-n", "-v"])
+        self.assertLessEqual(len(calls) - n, 1)
+
+
+@unittest.skipUnless(HAVE_TEXTUAL, "textual not installed")
+class TestPasswordScreen(unittest.IsolatedAsyncioTestCase):
+    async def _run(self, ticket, accepted):
+        from unittest import mock
+
+        app = tui.StaApp(skip_welcome=True)
+        app.source, app.dest_path = fake_found()[0][1], "/tmp/x"
+        asked = []
+        app.ask_password = lambda: asked.append(1) or accepted
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(tui.PasswordScreen())
+            await pilot.pause(0.2)
+            with mock.patch.object(tui.privileges, "has_ticket", side_effect=ticket):
+                with mock.patch.object(type(app), "suspend", mock.MagicMock()):
+                    await pilot.press("enter")
+                    await pilot.pause(0.3)
+            return type(app.screen).__name__, asked
+
+    async def test_existing_ticket_skips_the_prompt(self):
+        name, asked = await self._run([True], True)
+        self.assertEqual((name, asked), ("ScanScreen", []))
+
+    async def test_password_accepted_moves_on(self):
+        name, asked = await self._run([False, True], True)
+        self.assertEqual((name, len(asked)), ("ScanScreen", 1))
+
+    async def test_wrong_or_cancelled_password_stays_and_lets_the_user_retry(self):
+        name, asked = await self._run([False], False)
+        self.assertEqual((name, len(asked)), ("PasswordScreen", 1))
