@@ -22,11 +22,11 @@ It is an archive, not a Time Machine replacement: you open a folder and find wha
 years ago.
 
 > **Status:** the v2 engine (command line) is working and tested against a real 12-snapshot
-> backup. A terminal UI and network-share support are next (see [Roadmap](#roadmap)).
+> backup. A terminal UI is next (see [Roadmap](#roadmap)).
 
 ## Requirements
 
-- macOS with an APFS Time Machine backup disk mounted (a network `.sparsebundle` is on the roadmap).
+- macOS with the APFS Time Machine backup disk (a local USB disk) mounted.
 - Python 3.9+ — standard library only.
 - `sudo`: mounting snapshots needs root. Everything the tool writes is handed back to your user.
 
@@ -50,7 +50,8 @@ sudo python3 -m sta extract "/Volumes/My Backup" /Volumes/Archive
 | `--one-per-day` | keep only the last snapshot of each day |
 | `--users bob` / `--folders Documents,Desktop` | limit to users / top-level home folders (hidden files are included by default) |
 | `--exclude GLOB` | skip any path component matching the glob (repeatable, exact component, not substring) |
-| `--yes` | accept the "destination has no hard links" warning |
+| `--dest-image` | write into a case-sensitive APFS disk image (`SmartTimeArchive.sparsebundle`) created inside the destination: keeps hard links on exFAT, NTFS or network shares |
+| `--yes` | accept the "destination has no hard links" warning and store everything in full |
 | `--no-cache` | ignore the scan cache |
 
 `plan` and `extract` first read the **metadata of every file** in the selected snapshots. On an old
@@ -72,14 +73,18 @@ Ctrl+C cancels cleanly and never reports success.
 - A sha256 is stored per file in `_sta/manifests/` (computed on the copy, so the fragile source disk
   is not read twice). Names containing `\`, newline or carriage return are escaped like GNU `sha256sum`.
 - Disk space is checked before copying. A destination without hard links (exFAT, NTFS, SMB share) is
-  refused unless you pass `--yes`, and the plan shows the size with and without links.
+  refused unless you pass `--dest-image` (recommended) or `--yes`, and the plan shows the size with and without links.
 - Ownership, permissions, extended attributes, ACLs and timestamps are preserved (via `copyfile(3)`),
   so some files stay unreadable for a normal user, as in the original.
 
 ## Good to know
 
 - **Copying the archive later with Finder breaks the hard links** and multiplies its size. Move it with
-  `rsync -aH` or `ditto`.
+  `sudo ditto SRC DST` (checked: it keeps hard links, owners, modes, xattrs and symlinks; the only thing
+  it lost in a real test was the own timestamp of one symlink that carries a "deny writeattr" ACL) or
+  `rsync -aH`. Never copy it to an exFAT/NTFS/SMB destination directly: use `--dest-image`.
+- The disk image is created with `diskutil image` (macOS versions without it fall back to the deprecated
+  `hdiutil`). Its volume is **case-sensitive APFS**, like the Time Machine backup it comes from.
 - On a case-insensitive destination (the default for Mac system disks) two names that differ only in
   case collide; the tool detects it and lists them in the report instead of overwriting.
 - Only the `Data/Users` part of each backup is extracted (your files and settings, not the sealed
@@ -95,12 +100,20 @@ The tests build fake "snapshots" with the same hard-link layout Time Machine lea
 per date, links, hidden files, symlinks, xattrs, timestamps, unreadable files, cancellation, resume,
 filters and the scan cache.
 
+## Scope
+
+**Source:** a Time Machine backup on a local USB disk (APFS). That is the case Apple gives no way out of.
+(A Time Machine backup on a network share is a `.sparsebundle` file: to just move it, copy that file.
+The engine can read one that is already attached, but it is not a supported source.)
+
+**Destination:** another USB disk, or a network unit. Disks that cannot hold hard links (exFAT, NTFS,
+SMB shares) use a case-sensitive APFS disk image created inside them with `--dest-image`.
+
 ## Roadmap
 
-1. **Engine (CLI)** — done.
-2. `.sparsebundle` as source (Time Machine on a NAS) and as destination (image created on a network share).
-3. Terminal UI wizard: pick source → contents → destination → confirm → run → report.
-4. Optional `.tar.gz` output that keeps the hard links.
+1. **Engine (CLI)** — done, including `--dest-image`.
+2. Terminal UI wizard: pick source → contents → destination → confirm → run → report.
+3. Optional `.tar.gz` output that keeps the hard links.
 
 `main.py`, `engine.py` and `ui/` are the **v1 desktop app** (PySide6). They are kept until the terminal UI
 replaces them and should not be used on data you care about: v1 can delete the source after a migration

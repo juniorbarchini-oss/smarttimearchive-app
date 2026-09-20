@@ -21,6 +21,7 @@ import stat
 import tempfile
 import time
 
+from .util import own as _own
 from .apfs import ApfsError, SnapshotMount, find_data_root, list_snapshots, volume_info
 
 COMPLETED = "COMPLETED"
@@ -40,14 +41,6 @@ _COPY_META = _ACL | _STAT | _XATTR | _NOFOLLOW_SRC | _NOFOLLOW_DST
 
 _libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
 _libc.copyfile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32]
-
-
-def _own(path):
-    """When run through sudo, hand what we create back to the invoking user."""
-    uid, gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
-    if os.geteuid() == 0 and uid and gid:
-        with contextlib.suppress(OSError):
-            os.lchown(path, int(uid), int(gid))
 
 
 def manifest_line(sha, rel):
@@ -382,7 +375,7 @@ def dest_traits(dest):
         shutil.rmtree(probe, ignore_errors=True)
 
 
-def make_plan(conn, dest):
+def make_plan(conn, dest, via_image=False):
     q = conn.execute
     files, full = q("SELECT COUNT(*), COALESCE(SUM(size),0) FROM files WHERE kind='f'").fetchone()
     unique_files, unique = q(
@@ -390,6 +383,9 @@ def make_plan(conn, dest):
         "(SELECT size AS s FROM files WHERE kind='f' GROUP BY ino,size,mtime_ns)"
     ).fetchone()
     links, case_insens, free = dest_traits(dest)
+    host_links = links
+    if via_image:  # we write inside a case-sensitive APFS image: links work, no case clashes
+        links, case_insens = True, False
     needed = unique if links else full
     needed_margin = int(needed * (1 + SPACE_MARGIN)) + SPACE_MARGIN_BYTES
     return {
@@ -399,6 +395,8 @@ def make_plan(conn, dest):
         "bytes_with_links": unique,
         "bytes_without_links": full,
         "dest_hardlinks": links,
+        "host_hardlinks": host_links,
+        "via_image": via_image,
         "dest_case_insensitive": case_insens,
         "dest_free": free,
         "bytes_needed": needed,

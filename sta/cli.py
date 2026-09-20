@@ -7,7 +7,7 @@ import signal
 import sys
 import tempfile
 
-from . import core
+from . import core, image
 from .apfs import ApfsError, cleanup_stale_mounts
 
 
@@ -53,6 +53,13 @@ def _parser():
         sp.add_argument(
             "--no-cache", action="store_true", help="ignore and do not write the scan cache"
         )
+        if dest:
+            sp.add_argument(
+                "--dest-image",
+                action="store_true",
+                help="write into a case-sensitive APFS disk image (SmartTimeArchive.sparsebundle) "
+                "created inside DEST; for destinations without hard links (exFAT, NTFS, SMB)",
+            )
 
     common(sub.add_parser("list", help="list snapshots"), dest=False)
     common(sub.add_parser("plan", help="scan and show sizes / space check"), dest=True)
@@ -80,7 +87,12 @@ def _plan_text(plan):
         f"Files (all snapshots):   {plan['files']:,}  ({plan['unique_files']:,} unique)",
         f"Size WITH hard links:    {_gb(plan['bytes_with_links'])}",
         f"Size WITHOUT hard links: {_gb(plan['bytes_without_links'])}",
-        f"Destination hard links:  {'yes' if plan['dest_hardlinks'] else 'NO'}",
+        f"Destination hard links:  {'yes' if plan['dest_hardlinks'] else 'NO'}"
+        + (
+            f"  (via disk image; the disk itself: {'yes' if plan['host_hardlinks'] else 'NO'})"
+            if plan["via_image"]
+            else ""
+        ),
         f"Destination case-insens: {'yes' if plan['dest_case_insensitive'] else 'no'}",
         f"Destination free:        {_gb(plan['dest_free'])}",
         f"Space needed (+margin):  {_gb(plan['bytes_needed_with_margin'])}   -> "
@@ -116,6 +128,18 @@ def main(argv=None):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _extract(source, dest, conn, dates, plan, cancelled):
+    ext = core.Extractor(
+        source,
+        dest,
+        conn,
+        dates,
+        cancel=lambda: bool(cancelled),
+        case_insensitive=plan["dest_case_insensitive"],
+    )
+    return ext.run(), ext.report
+
+
 def _run(args, source, dates, opts, work):
     use_cache = args.source_type == "apfs" and not args.no_cache
     pending = core.uncached_dates(source, dates, opts) if use_cache else dates
@@ -128,7 +152,7 @@ def _run(args, source, dates, opts, work):
     conn, scan_errors = core.scan(
         source, dates, opts, os.path.join(work, "scan.db"), use_cache=use_cache
     )
-    plan = core.make_plan(conn, args.dest)
+    plan = core.make_plan(conn, args.dest, via_image=args.dest_image)
     print(_plan_text(plan))
     n_err = sum(len(v) for v in scan_errors.values())
     if n_err:
@@ -142,23 +166,29 @@ def _run(args, source, dates, opts, work):
         sys.exit("Not enough free space on the destination. Nothing was copied.")
     if not plan["dest_hardlinks"] and not args.yes:
         sys.exit(
-            "Destination does not support hard links: every snapshot is stored in full "
-            f"({_gb(plan['bytes_without_links'])}). Re-run with --yes to continue."
+            "Destination does not support hard links: every snapshot would be stored in full "
+            f"({_gb(plan['bytes_without_links'])} instead of {_gb(plan['bytes_with_links'])}).\n"
+            "Re-run with --dest-image to write into an APFS disk image on it (recommended), "
+            "or with --yes to store everything in full."
         )
 
     cancelled = []
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: cancelled.append(1))
-    ext = core.Extractor(
-        source,
-        args.dest,
-        conn,
-        dates,
-        cancel=lambda: bool(cancelled),
-        case_insensitive=plan["dest_case_insensitive"],
-    )
-    status = ext.run()
-    print(f"\nStatus: {status}\nReport: {ext.report.get('report_file')}")
+    if args.dest_image:
+        img = os.path.join(args.dest, image.IMAGE_NAME)
+        size = image.image_size_for(plan["bytes_needed_with_margin"])
+        print(f"Using disk image {img} (max {_gb(size)}, grows as needed)")
+        with image.ImageMount(img, size) as im:
+            status, report = _extract(source, im.mountpoint, conn, dates, plan, cancelled)
+        if report.get("report_file"):  # the mount point is gone after detaching
+            report["report_file"] = report["report_file"].replace(im.mountpoint, img + " (inside)")
+        if im.detached is False:
+            print(f'WARNING: could not detach the image; run: hdiutil detach "{im.mountpoint}"')
+        print(f"Archive is inside {img} (double-click it to open)")
+    else:
+        status, report = _extract(source, args.dest, conn, dates, plan, cancelled)
+    print(f"\nStatus: {status}\nReport: {report.get('report_file')}")
     return {core.COMPLETED: 0, core.COMPLETED_WITH_ERRORS: 3, core.CANCELLED: 130}.get(status, 1)
 
 
