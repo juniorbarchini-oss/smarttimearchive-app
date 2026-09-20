@@ -75,21 +75,23 @@ offered, and the others are listed with the reason they cannot be used.
 - The engine itself uses only the standard library; the UI needs [Textual](https://textual.textualize.io)
   (the installer fetches it once).
 
-## Usage
+## Usage (engine commands)
+
+The same engine works without the UI (after installing, `sta` is on your PATH):
 
 ```bash
 # 1. which snapshots does the backup contain?
-sudo python3 -m sta list "/Volumes/My Backup"
+sudo sta list "/Volumes/My Backup"
 
 # 2. how much space is needed? (read-only, nothing is copied)
-sudo python3 -m sta plan "/Volumes/My Backup" /Volumes/Archive
+sudo sta plan "/Volumes/My Backup" /Volumes/Archive
 
 # 3. extract
-sudo python3 -m sta extract "/Volumes/My Backup" /Volumes/Archive
+sudo sta extract "/Volumes/My Backup" /Volumes/Archive
 
 # 4. later: re-check the archive against its sha256 manifests (read-only; sudo also covers
 #    the permission-protected files). Works on a folder or on a SmartTimeArchive image.
-sudo python3 -m sta verify /Volumes/Archive
+sudo sta verify /Volumes/Archive
 ```
 
 | Option | Meaning |
@@ -99,7 +101,7 @@ sudo python3 -m sta verify /Volumes/Archive
 | `--one-per-day` | keep only the last snapshot of each day |
 | `--users bob` / `--folders Documents,Desktop` | limit to users / top-level home folders (hidden files are included by default) |
 | `--exclude GLOB` | skip any path component matching the glob (repeatable, exact component, not substring) |
-| `--dest-image` | write into a case-sensitive APFS disk image (`SmartTimeArchive.sparsebundle`) created inside the destination: keeps hard links on exFAT, NTFS or network shares |
+| `--dest-image` | write into a **new** case-sensitive APFS disk image (`SmartTimeArchive_<date>-<time>.sparsebundle`) created inside the destination, sized at 90% of its free space (sparse: it only takes what is written). Keeps hard links on exFAT, NTFS or network shares. An existing image is never reused |
 | `--yes` | accept the "destination has no hard links" warning and store everything in full |
 | `--no-cache` | ignore the scan cache |
 | `--json` | machine-readable output, one JSON object per line (plan, progress, result); used by the terminal UI |
@@ -117,7 +119,7 @@ Ctrl+C cancels cleanly and never reports success.
 
 - The backup is mounted **read-only** and is never modified. Nothing is ever deleted from it.
 - Each date is written to `<date>.partial` and renamed only when finished, so an interrupted run is
-  visible as such. Re-running skips finished dates and still links against them.
+  visible as such. Writing into a folder, re-running skips finished dates and still links against them (every disk image is a new one, so a repeated copy into an image starts again).
 - Every source file is read **once**; read errors (`EIO`) are retried a couple of times, logged and the
   run continues. The final report lists exactly which files could not be read.
 - A sha256 is stored per file in `_sta/manifests/` (computed on the copy, so the fragile source disk
@@ -129,6 +131,7 @@ Ctrl+C cancels cleanly and never reports success.
 
 ## Good to know
 
+- **If the disk fills up** the copy stops at once with a clear message; the finished dates are kept.
 - **Copying the archive later with Finder breaks the hard links** and multiplies its size. Move it with
   `sudo ditto SRC DST` (checked: it keeps hard links, owners, modes, xattrs and symlinks; the only thing
   it lost in a real test was the own timestamp of one symlink that carries a "deny writeattr" ACL) or
@@ -143,12 +146,12 @@ Ctrl+C cancels cleanly and never reports success.
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests
+venv/bin/python -m unittest discover -s tests   # the UI tests need Textual and are skipped without it
 ```
 
 The tests build fake "snapshots" with the same hard-link layout Time Machine leaves and check content
 per date, links, hidden files, symlinks, xattrs, timestamps, unreadable files, cancellation, resume,
-filters and the scan cache.
+filters, the scan cache, the installer's ownership rules and the terminal UI (with a fake engine).
 
 ## Scope
 
@@ -156,18 +159,32 @@ filters and the scan cache.
 (A Time Machine backup on a network share is a `.sparsebundle` file: to just move it, copy that file.
 The engine can read one that is already attached, but it is not a supported source.)
 
+**Encrypted backup disks are not handled yet (planned for 2.1).** If your Time Machine disk is
+encrypted, unlock it in Finder first (macOS asks for the backup password when you connect it) and then
+open the tool. This is expected to work but **has not been tested**. If the password is lost, nothing can
+open that backup, with this tool or any other.
+
 **Destination:** another USB disk, or a network unit. Disks that cannot hold hard links (exFAT, NTFS,
 SMB shares) use a case-sensitive APFS disk image created inside them with `--dest-image`.
 
 ## Roadmap
 
-1. **Engine (CLI)** — done, including `--dest-image`.
-2. Terminal UI wizard: pick source → contents → destination → confirm → run → report.
-3. Optional `.tar.gz` output that keeps the hard links.
+- **2.0** — engine (CLI), terminal UI wizard, installer (`install.sh`), always-new adaptive disk images,
+  optional verification, scan-cache control. *This release.*
+- **2.1** — encrypted / locked backup disks handled inside the tool (detect, explain, and guide the
+  unlock instead of leaving it to Finder); `.pkg` installer; Homebrew tap.
+- **Ideas** — `sta copy` to move an already extracted archive; optional `.tar.gz` output that keeps the
+  hard links.
 
-`main.py`, `engine.py` and `ui/` are the **v1 desktop app** (PySide6). They are kept until the terminal UI
-replaces them and should not be used on data you care about: v1 can delete the source after a migration
-that reported errors, and reports success after a cancel.
+The v1 desktop app (PySide6) was retired: it could delete the source after a migration that reported
+errors and reported success after a cancel. It remains in the git history only.
+
+## Development
+
+```bash
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+./smarttimearchive          # runs the UI from this folder (no install needed)
+```
 
 ## Credits
 

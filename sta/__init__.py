@@ -1,6 +1,6 @@
 """SmartTimeArchive engine: extract Time Machine APFS history to dated folders."""
 
-__version__ = "2.0.0-dev"
+__version__ = "2.0.0"
 AUTHOR = "Humberto Barchini"
 CREDIT = f"Created by {AUTHOR}. Built together with Claude (Anthropic), using Claude Code."
 REPO = "github.com/juniorbarchini-oss/smarttimearchive-app"
