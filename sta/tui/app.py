@@ -207,45 +207,12 @@ def nice_date(name):
     return f"{name[:10]}  {name[11:13]}:{name[13:15]}:{name[15:17]}"
 
 
-class OldestDialog(ModalScreen):
-    """Asks how many of the oldest backups to pick."""
-
-    BINDINGS = [("escape", "cancel", "Cancel")]
-
-    def __init__(self, total, default):
-        super().__init__()
-        self.total, self.default = total, default
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="dialog"):
-            yield Static("How many of the oldest backups?", id="dialog-title")
-            yield Input(value=str(self.default), type="integer", id="oldest-n")
-            yield Static(f"1 to {self.total}  -  Enter applies, Esc cancels", classes="dim")
-
-    def on_mount(self):
-        self.query_one("#oldest-n", Input).focus()
-
-    def on_input_submitted(self, event):
-        try:
-            n = int(event.value)
-        except ValueError:
-            n = 0
-        if 1 <= n <= self.total:
-            self.dismiss(n)
-        else:
-            self.notify(f"Type a number from 1 to {self.total}.", severity="warning")
-
-    def action_cancel(self):
-        self.dismiss(None)
-
-
 class BackupsScreen(Screen):
-    """Step 2: which backups (dated folders) to archive. What is inside them is not touched."""
+    """Step 2: which backups (dated folders) to archive. The user chooses; nothing starts marked."""
 
     BINDINGS = [
-        ("a", "all", "All (retire this disk)"),
-        ("o", "oldest", "Oldest N (make room)"),
-        ("n", "none", "None"),
+        ("a", "all", "Mark all"),
+        ("n", "none", "Unmark all"),
         ("c", "continue", "Continue"),
         ("escape", "app.pop_screen", "Back"),
         ("q", "app.quit", "Quit"),
@@ -257,11 +224,10 @@ class BackupsScreen(Screen):
         yield Static(f"Which backups do you want to archive from {src.name}?", classes="heading")
         yield Static(
             "Your Time Machine disk is not touched: this only makes a copy.\n"
-            "Disk filling up?  Press o and take the oldest ones before Time Machine overwrites them.\n"
-            "Disk getting old? Press a and take everything.  Space bar checks or unchecks one.",
+            "Space bar marks or unmarks one backup.  a marks all,  n unmarks all.",
             classes="dim",
         )
-        yield SelectionList(*[Selection(nice_date(d), d, True) for d in src.snapshots], id="dates")
+        yield SelectionList(*[Selection(nice_date(d), d, False) for d in src.snapshots], id="dates")
         yield Static("", id="summary", classes="note")
         yield Footer()
 
@@ -281,9 +247,9 @@ class BackupsScreen(Screen):
         total = len(self.app.source.snapshots)
         if chosen:
             span = f"  ({chosen[0][:10]} to {chosen[-1][:10]})"
-            text = f"{len(chosen)} of {total} backups selected{span}"
+            text = f"{len(chosen)} of {total} backups marked{span}"
         else:
-            text = f"No backup selected (0 of {total}) - check at least one to continue"
+            text = f"No backup marked (0 of {total}) - mark at least one to continue"
         self.query_one("#summary", Static).update(text)
 
     def action_all(self):
@@ -292,20 +258,10 @@ class BackupsScreen(Screen):
     def action_none(self):
         self.dates.deselect_all()
 
-    def action_oldest(self):
-        total = len(self.app.source.snapshots)
-        self.app.push_screen(OldestDialog(total, max(1, total // 2)), self._apply_oldest)
-
-    def _apply_oldest(self, n):
-        if n:
-            self.dates.deselect_all()
-            for d in self.app.source.snapshots[:n]:  # snapshots are sorted oldest first
-                self.dates.select(d)
-
     def action_continue(self):
         chosen = sorted(self.dates.selected)
         if not chosen:
-            self.notify("Check at least one backup first.", severity="warning")
+            self.notify("Mark at least one backup first.", severity="warning")
             return
         self.app.dates = chosen
         self.app.push_screen(DestinationScreen())
