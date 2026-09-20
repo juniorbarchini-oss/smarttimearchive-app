@@ -76,10 +76,7 @@ def find_backup_volumes(apfs_list=None, info=_volume_info, snapshots=list_snapsh
             elif not bv.mountpoint:
                 bv.note = "not mounted"
             elif bv.bus == "Disk Image":
-                bv.note = (
-                    "Time Machine on a network image: not a supported source "
-                    "(to move it, copy the .sparsebundle file)"
-                )
+                bv.note = "network image: not a supported source (copy the .sparsebundle instead)"
             else:
                 try:
                     bv.snapshots = [d for d, _, _ in snapshots(bv.mountpoint)]

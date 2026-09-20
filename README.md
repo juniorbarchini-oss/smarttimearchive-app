@@ -24,6 +24,21 @@ years ago.
 > **Status:** the v2 engine (command line) is working and tested against a real 12-snapshot
 > backup. A terminal UI is next (see [Roadmap](#roadmap)).
 
+## Terminal UI
+
+A guided, retro-green wizard on top of the same engine (welcome banner, then: source, contents,
+destination, scan, run, report). It runs as your user and asks for `sudo` only for the engine.
+
+```bash
+python3 -m venv venv && venv/bin/pip install textual   # once
+./smarttimearchive                                     # opens the UI (no arguments)
+```
+
+Source disks are detected automatically: only local USB disks with Time Machine snapshots are
+offered, and the others are listed with the reason they cannot be used. *Status: welcome and
+source screens are done; the rest of the steps are being added.* The engine commands below work
+without installing anything.
+
 ## Requirements
 
 - macOS with the APFS Time Machine backup disk (a local USB disk) mounted.

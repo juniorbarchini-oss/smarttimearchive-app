@@ -1,0 +1,8 @@
+#!/bin/bash
+# Launcher: uses the project's virtualenv when it exists (the terminal UI needs Textual).
+# With no arguments it opens the terminal UI; with a subcommand it runs the engine.
+here="$(cd "$(dirname "$0")" && pwd)"
+py="$here/venv/bin/python"
+[ -x "$py" ] || py=python3
+export PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}"
+exec "$py" -m sta "$@"

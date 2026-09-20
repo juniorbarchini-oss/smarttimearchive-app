@@ -140,7 +140,24 @@ def _plan_text(plan):
     return "\n".join(lines)
 
 
+def _tui():
+    try:
+        from .tui.app import run
+    except ImportError:
+        print(
+            "The terminal UI needs Textual. Install it once:\n"
+            "  python3 -m venv venv && venv/bin/pip install textual\n"
+            "and start it with ./smarttimearchive  (the engine commands work without it)."
+        )
+        return 1
+    run()
+    return 0
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        return _tui()
     args = _parser().parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):  # progress must show up through pipes/tee
         sys.stdout.reconfigure(line_buffering=True)
