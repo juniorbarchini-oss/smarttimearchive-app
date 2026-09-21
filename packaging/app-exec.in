@@ -1,0 +1,2 @@
+#!/bin/bash
+exec open -a Terminal "@LIB@/launch.command"

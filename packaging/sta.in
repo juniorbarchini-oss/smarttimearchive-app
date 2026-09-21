@@ -1,0 +1,20 @@
+#!/bin/bash
+# sta            -> terminal UI          sta --tmux  -> the same, inside tmux (survives a closed window)
+# sta plan|extract|verify|list|cache ...  -> the engine commands (see: sta --help)
+home="@LIB@"
+if [ "${1:-}" = "--tmux" ]; then
+  shift
+  if [ -n "${TMUX:-}" ]; then
+    :  # already inside tmux
+  elif command -v tmux >/dev/null 2>&1; then
+    exec tmux new-session -A -s smarttimearchive "$0" "$@"
+  else
+    echo "tmux is not installed: running without it." >&2
+  fi
+fi
+py="$home/venv/bin/python"          # installed from the source (install.sh)
+[ -x "$py" ] || py="$home/python/bin/python3"   # installed from the .pkg (bundled Python)
+path="$home"
+[ -d "$home/site-packages" ] && path="$home:$home/site-packages"
+export PYTHONPATH="$path"
+exec "$py" -m sta "$@"

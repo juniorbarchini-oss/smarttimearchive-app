@@ -1,0 +1,9 @@
+#!/bin/bash
+# Opened by SmartTimeArchive.app inside Terminal. Sets the recommended window size first.
+printf '\e[8;42;120t'
+clear
+"@BIN@"
+status=$?
+echo
+echo "SmartTimeArchive closed. You can close this window."
+exit $status

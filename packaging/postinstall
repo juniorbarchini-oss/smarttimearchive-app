@@ -1,0 +1,12 @@
+#!/bin/bash
+# Runs as root after the files are in place: pick the Python that matches this Mac, keep only that one,
+# and make sure nothing the engine runs from can be changed by a normal user (it runs as administrator).
+lib=/usr/local/lib/smarttimearchive
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then keep=arm64; drop=x86_64; else keep=x86_64; drop=arm64; fi
+rm -rf "$lib/python-$drop"
+ln -s "python-$keep" "$lib/python"
+chown -R root:wheel "$lib" /usr/local/bin/sta /Applications/SmartTimeArchive.app
+chmod -R go-w "$lib" /usr/local/bin/sta /Applications/SmartTimeArchive.app
+# a quick check that the engine really starts with the bundled Python
+PYTHONPATH="$lib:$lib/site-packages" "$lib/python/bin/python3" -c "import sta, textual" || exit 1
+exit 0
