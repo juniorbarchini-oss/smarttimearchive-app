@@ -23,7 +23,7 @@ import time
 
 from .apfs import ApfsError, SnapshotMount, find_data_root, list_snapshots, volume_info
 from .image import image_capacity
-from .util import as_invoking_user
+from .util import copy_from_user, copy_to_user, makedirs_as_user
 from .util import own as _own
 
 COMPLETED = "COMPLETED"
@@ -302,8 +302,11 @@ def _private_copy(path):
     back the copy: root never opens a file the user could swap under its feet."""
     tmpdir = tempfile.mkdtemp(prefix="sta_cache_")  # mode 0700
     dst = os.path.join(tmpdir, "c.db")
-    with as_invoking_user():
-        shutil.copyfile(path, dst)
+    try:
+        copy_from_user(path, dst)
+    except BaseException:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
     return tmpdir, dst
 
 
@@ -365,14 +368,8 @@ def _scan_to_cache(snap, opts, cdir, log, emit):
 
 def _publish_cache(private, final):
     """Copy into the user's cache folder with the user's own rights; a failure only costs the cache."""
-    tmp = final + ".tmp"
     try:
-        with as_invoking_user():
-            os.makedirs(os.path.dirname(final), exist_ok=True)
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(tmp)
-            shutil.copyfile(private, tmp)
-            os.rename(tmp, final)
+        copy_to_user(private, final)
     except OSError:
         pass
 
@@ -385,8 +382,7 @@ def scan(source, dates, opts, db_path, log=print, use_cache=True, cdir=None, emi
     cdir = cdir or cache_dir()
     if use_cache:
         try:
-            with as_invoking_user():
-                os.makedirs(cdir, exist_ok=True)
+            makedirs_as_user(cdir)
         except OSError:
             use_cache = False
     scan_errors, spent, scanned = {}, 0.0, 0
@@ -737,13 +733,17 @@ class Extractor:
             self._write_report_to(os.path.join(self.dest, REPORT_DIR, name))
         except OSError as e:  # e.g. the destination is full: keep the report somewhere else
             fallback = os.path.join(cache_dir(), name)
-            with as_invoking_user():  # the folder is the user's: never write there as root
-                os.makedirs(os.path.dirname(fallback), exist_ok=True)
-                self._write_report_to(fallback)
+            scratch = tempfile.mkdtemp(prefix="sta_report_")  # written here, then handed over
+            try:
+                self._write_report_to(os.path.join(scratch, name), shown=fallback)
+                for ext in (".json", ".txt"):
+                    copy_to_user(os.path.join(scratch, name + ext), fallback + ext)
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
             self.log(f"Report not written on the destination ({e.strerror}); kept in {fallback}")
 
-    def _write_report_to(self, base):
-        self.report["report_file"] = base + ".txt"
+    def _write_report_to(self, base, shown=None):
+        self.report["report_file"] = (shown or base) + ".txt"
         with open(base + ".json", "w") as f:
             json.dump(self.report, f, indent=2)
         _own(base + ".json")

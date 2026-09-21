@@ -322,19 +322,20 @@ class TestDiskFull(Fixture):
         real = ext._write_report_to
         seen = []
 
-        def flaky(base):
+        def flaky(base, shown=None):
             seen.append(base)
             if len(seen) == 1:
                 raise OSError(errno.ENOSPC, "No space left on device")
-            return real(base)
+            return real(base, shown)
 
         with mock.patch.object(ext, "_write_report_to", side_effect=flaky), mock.patch.object(
             core, "cache_dir", return_value=os.path.join(self.tmp, "cache")
         ):
             ext.run()
         self.assertEqual(len(seen), 2)
-        self.assertTrue(seen[1].startswith(os.path.join(self.tmp, "cache")))
+        self.assertTrue(ext.report["report_file"].startswith(os.path.join(self.tmp, "cache")))
         self.assertTrue(os.path.exists(ext.report["report_file"]))
+        self.assertTrue(os.path.exists(ext.report["report_file"][:-4] + ".json"))
 
 
 class TestScanCache(unittest.TestCase):
@@ -409,56 +410,83 @@ class TestUnsafePaths(Fixture):
 class TestCacheAsTheUser(Fixture):
     """The engine runs as root but must touch the user's cache folder with the user's own rights."""
 
-    def test_as_invoking_user_is_a_noop_without_root_and_sudo(self):
-        from unittest import mock
-
-        from sta import util
-
-        with mock.patch.object(util.os, "seteuid") as seteuid, mock.patch.object(
-            util.os, "setegid"
-        ) as setegid:
-            with util.as_invoking_user():
-                pass
-            with mock.patch.dict(os.environ, {"SUDO_UID": "501", "SUDO_GID": "20"}):
-                with util.as_invoking_user():  # not root: still nothing to do
-                    pass
-        self.assertFalse(seteuid.called or setegid.called)
-
-    def test_as_invoking_user_drops_then_restores_in_a_safe_order(self):
+    def test_the_drop_is_permanent_and_in_the_safe_order(self):
         from unittest import mock
 
         from sta import util
 
         calls = []
-        with mock.patch.dict(os.environ, {"SUDO_UID": "501", "SUDO_GID": "20"}), \
-                mock.patch.object(util.os, "geteuid", return_value=0), \
-                mock.patch.object(util.os, "getgroups", return_value=[0, 80]), \
-                mock.patch.object(util.os, "setgroups", side_effect=lambda g: calls.append(("groups", g))), \
-                mock.patch.object(util.os, "setegid", side_effect=lambda g: calls.append(("egid", g))), \
-                mock.patch.object(util.os, "seteuid", side_effect=lambda u: calls.append(("euid", u))):  # fmt: skip
-            with util.as_invoking_user():
-                calls.append("inside")
-            self.assertEqual(
-                calls,
-                [("groups", [20]), ("egid", 20), ("euid", 501), "inside",
-                 ("euid", 0), ("egid", 0), ("groups", [0, 80])],
-            )  # fmt: skip
+        with mock.patch.object(util.os, "setgroups", side_effect=lambda g: calls.append(("groups", g))), \
+                mock.patch.object(util.os, "setgid", side_effect=lambda g: calls.append(("gid", g))), \
+                mock.patch.object(util.os, "setuid", side_effect=lambda u: calls.append(("uid", u))):  # fmt: skip
+            util._drop_for_good(501, 20)
+        self.assertEqual(calls, [("groups", [20]), ("gid", 20), ("uid", 501)])  # uid last
 
-    def test_restores_root_even_when_the_work_inside_fails(self):
+    def test_invoking_user_needs_root_and_sudo(self):
         from unittest import mock
 
         from sta import util
 
-        calls = []
-        with mock.patch.dict(os.environ, {"SUDO_UID": "501", "SUDO_GID": "20"}), \
-                mock.patch.object(util.os, "geteuid", return_value=0), \
-                mock.patch.object(util.os, "getgroups", return_value=[0]), \
-                mock.patch.object(util.os, "setgroups"), mock.patch.object(util.os, "setegid"), \
-                mock.patch.object(util.os, "seteuid", side_effect=lambda u: calls.append(u)):  # fmt: skip
-            with self.assertRaises(RuntimeError):
-                with util.as_invoking_user():
-                    raise RuntimeError("boom")
-        self.assertEqual(calls, [501, 0])
+        with mock.patch.dict(os.environ, {"SUDO_UID": "501", "SUDO_GID": "20"}):
+            with mock.patch.object(util.os, "geteuid", return_value=0):
+                self.assertEqual(util.invoking_user(), (501, 20))
+            with mock.patch.object(util.os, "geteuid", return_value=501):
+                self.assertIsNone(util.invoking_user())
+        with mock.patch.object(util.os, "geteuid", return_value=0), \
+                mock.patch.dict(os.environ, {}, clear=True):  # logged in as root, no sudo
+            self.assertIsNone(util.invoking_user())
+
+    def as_child_without_root(self):
+        """Exercise the forked-child path as the current user (dropping is mocked out)."""
+        from unittest import mock
+
+        from sta import util
+
+        return mock.patch.multiple(
+            util,
+            invoking_user=lambda: (os.getuid(), os.getgid()),
+            _drop_for_good=lambda uid, gid: None,
+        )
+
+    def test_child_copies_stream_files_both_ways_and_report_failures(self):
+        from sta import util
+
+        big = os.path.join(self.tmp, "big.bin")
+        payload = os.urandom(3 * util.CHUNK + 123)  # several chunks and a partial one
+        with open(big, "wb") as f:
+            f.write(payload)
+        with self.as_child_without_root():
+            got = os.path.join(self.tmp, "got.bin")
+            util.copy_from_user(big, got)
+            self.assertEqual(open(got, "rb").read(), payload)
+            with self.assertRaises(OSError):
+                util.copy_from_user(os.path.join(self.tmp, "missing"), got)
+            out = os.path.join(self.tmp, "deep", "er", "out.db")
+            util.copy_to_user(big, out)
+            self.assertEqual(open(out, "rb").read(), payload)
+            self.assertFalse(os.path.exists(out + ".tmp"))
+            util.makedirs_as_user(os.path.join(self.tmp, "m", "n"))
+            self.assertTrue(os.path.isdir(os.path.join(self.tmp, "m", "n")))
+            with self.assertRaises(OSError):  # the user cannot write there: reported, not hidden
+                util.copy_to_user(big, "/proc-does-not-exist/x.db")
+
+    def test_a_planted_symlink_is_not_followed_when_publishing(self):
+        from sta import util
+
+        victim = os.path.join(self.tmp, "victim.txt")
+        with open(victim, "w") as f:
+            f.write("keep me")
+        src = os.path.join(self.tmp, "new.db")
+        with open(src, "w") as f:
+            f.write("scan")
+        dst = os.path.join(self.tmp, "cache", "a.db")
+        os.makedirs(os.path.dirname(dst))
+        os.symlink(victim, dst + ".tmp")  # what a malicious program would leave behind
+        with self.as_child_without_root():
+            util.copy_to_user(src, dst)
+        self.assertEqual(open(victim).read(), "keep me")
+        self.assertEqual(open(dst).read(), "scan")
+        self.assertFalse(os.path.islink(dst))
 
     def test_cache_round_trip_leaves_no_private_copies_or_tmp_files_behind(self):
         import glob
