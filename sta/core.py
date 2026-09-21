@@ -23,6 +23,7 @@ import time
 
 from .apfs import ApfsError, SnapshotMount, find_data_root, list_snapshots, volume_info
 from .image import image_capacity
+from .util import as_invoking_user
 from .util import own as _own
 
 COMPLETED = "COMPLETED"
@@ -296,7 +297,25 @@ def uncached_dates(source, dates, opts, cdir=None):
     ]
 
 
+def _private_copy(path):
+    """Copy a cache file (read with the user's rights) into a folder only root can enter, and hand
+    back the copy: root never opens a file the user could swap under its feet."""
+    tmpdir = tempfile.mkdtemp(prefix="sta_cache_")  # mode 0700
+    dst = os.path.join(tmpdir, "c.db")
+    with as_invoking_user():
+        shutil.copyfile(path, dst)
+    return tmpdir, dst
+
+
 def _load_cached(conn, path, opts, needs_filter):
+    tmpdir, path = _private_copy(path)
+    try:
+        return _attach_and_load(conn, path, opts, needs_filter)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _attach_and_load(conn, path, opts, needs_filter):
     conn.execute("ATTACH DATABASE ? AS c", (path,))
     try:
         errors = json.loads(conn.execute("SELECT v FROM c.meta WHERE k='errors'").fetchone()[0])
@@ -316,12 +335,12 @@ def _load_cached(conn, path, opts, needs_filter):
 
 
 def _scan_to_cache(snap, opts, cdir, log, emit):
-    """Scans one snapshot into its own cache file (atomic rename). Returns the path."""
+    """Scans one snapshot into a private db, then publishes it in the user's cache folder as that
+    user (atomic rename). Returns (private_db_path, tmpdir): the caller loads it and removes tmpdir."""
     final = _cache_file(cdir, snap, _opts_key(opts))
-    tmp = final + ".tmp"
-    if os.path.exists(tmp):
-        os.unlink(tmp)
-    c = _open_db(tmp)
+    tmpdir = tempfile.mkdtemp(prefix="sta_scan_")  # only root can enter it
+    private = os.path.join(tmpdir, "scan.db")
+    c = _open_db(private)
     c.execute("CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)")
     t0 = time.time()
     with snap.opener() as root:
@@ -340,9 +359,22 @@ def _scan_to_cache(snap, opts, cdir, log, emit):
     c.execute("INSERT INTO meta VALUES ('seconds', ?)", (str(time.time() - t0),))
     c.commit()
     c.close()
-    os.rename(tmp, final)
-    _own(final)
-    return final
+    _publish_cache(private, final)
+    return private, tmpdir
+
+
+def _publish_cache(private, final):
+    """Copy into the user's cache folder with the user's own rights; a failure only costs the cache."""
+    tmp = final + ".tmp"
+    try:
+        with as_invoking_user():
+            os.makedirs(os.path.dirname(final), exist_ok=True)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
+            shutil.copyfile(private, tmp)
+            os.rename(tmp, final)
+    except OSError:
+        pass
 
 
 def scan(source, dates, opts, db_path, log=print, use_cache=True, cdir=None, emit=lambda ev: None):
@@ -353,9 +385,8 @@ def scan(source, dates, opts, db_path, log=print, use_cache=True, cdir=None, emi
     cdir = cdir or cache_dir()
     if use_cache:
         try:
-            os.makedirs(cdir, exist_ok=True)
-            _own(os.path.dirname(cdir))
-            _own(cdir)
+            with as_invoking_user():
+                os.makedirs(cdir, exist_ok=True)
         except OSError:
             use_cache = False
     scan_errors, spent, scanned = {}, 0.0, 0
@@ -380,8 +411,11 @@ def scan(source, dates, opts, db_path, log=print, use_cache=True, cdir=None, emi
         )
         t0 = time.time()
         if use_cache:
-            path = _scan_to_cache(snap, opts, cdir, log, emit)
-            scan_errors[snap.date] = _load_cached(conn, path, opts, False)
+            private, tmpdir = _scan_to_cache(snap, opts, cdir, log, emit)
+            try:
+                scan_errors[snap.date] = _attach_and_load(conn, private, opts, False)
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
         else:
             with snap.opener() as root:
                 scan_errors[snap.date] = scan_snapshot(conn, snap.date, root, opts)
@@ -703,8 +737,9 @@ class Extractor:
             self._write_report_to(os.path.join(self.dest, REPORT_DIR, name))
         except OSError as e:  # e.g. the destination is full: keep the report somewhere else
             fallback = os.path.join(cache_dir(), name)
-            os.makedirs(os.path.dirname(fallback), exist_ok=True)
-            self._write_report_to(fallback)
+            with as_invoking_user():  # the folder is the user's: never write there as root
+                os.makedirs(os.path.dirname(fallback), exist_ok=True)
+                self._write_report_to(fallback)
             self.log(f"Report not written on the destination ({e.strerror}); kept in {fallback}")
 
     def _write_report_to(self, base):
