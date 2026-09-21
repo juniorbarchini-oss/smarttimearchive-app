@@ -39,10 +39,12 @@ warning the first time: open *System Settings > Privacy & Security*, scroll down
 
 ```bash
 brew tap juniorbarchini-oss/tap
+brew trust --cask juniorbarchini-oss/tap/smarttimearchive
 brew install --cask smarttimearchive
 ```
 
-Homebrew asks for your password because the installer needs it. Update with
+Homebrew 7 makes you trust anything from a non-official tap before it loads it; the `brew trust` line
+does that for this cask only. Homebrew asks for your password because the installer needs it. Update with
 `brew upgrade --cask smarttimearchive`; remove with `brew uninstall --cask smarttimearchive` (add
 `--zap` to also delete the scan cache).
 
