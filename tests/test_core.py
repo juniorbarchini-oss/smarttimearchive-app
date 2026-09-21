@@ -379,3 +379,28 @@ class TestScanCache(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(self.dir, "aa_full.db")), "show only")
             self.assertEqual(cli.main(["cache", "--clear"]), 0)
         self.assertFalse(os.path.exists(self.dir))
+
+
+class TestUnsafePaths(Fixture):
+    def test_safe_rel(self):
+        for ok in ("Users/a/b.txt", "Users/a/..hidden", "a/b..c/d"):
+            self.assertTrue(core.safe_rel(ok), ok)
+        for bad in ("", "/etc/passwd", "../x", "Users/../../x", "a/../b", "a\0b"):
+            self.assertFalse(core.safe_rel(bad), repr(bad))
+
+    def test_a_tampered_scan_cannot_make_the_engine_write_outside_the_destination(self):
+        conn, _ = core.scan(self.source, self.dates[:1], core.Options(),
+                            os.path.join(self.tmp, "t.db"), log=lambda *_: None,
+                            use_cache=False)  # fmt: skip
+        date = self.dates[0]
+        conn.execute("INSERT INTO files VALUES (?,?,?,?,?,?)", (date, "../ESCAPED.txt", "f", 9, 3, 1))
+        conn.execute("INSERT INTO files VALUES (?,?,?,?,?,?)", (date, "/tmp/ESCAPED_ABS", "f", 8, 3, 1))
+        conn.commit()
+        ext = core.Extractor(self.source, self.dst, conn, self.dates[:1], log=lambda *_: None)
+        status = ext.run()
+        parent = os.path.dirname(self.dst)
+        self.assertFalse(os.path.exists(os.path.join(parent, "ESCAPED.txt")))
+        self.assertFalse(os.path.exists("/tmp/ESCAPED_ABS"))
+        self.assertEqual(status, core.COMPLETED_WITH_ERRORS)
+        errs = [e for e in ext.report["dates"][date]["errors"] if "unsafe path" in e[2]]
+        self.assertEqual(len(errs), 2)
