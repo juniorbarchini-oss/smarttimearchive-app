@@ -29,7 +29,7 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 macos="$(sw_vers -productVersion 2>/dev/null || echo 0)"
 [ "${macos%%.*}" -ge 11 ] 2>/dev/null || die "macOS 11 (Big Sur) or newer is required: Time Machine
 saves APFS backups, the only kind this tool reads, since macOS 11 (you have $macos)."
-[ -d "$here/sta" ] || die "run this script from the SmartTimeArchive folder (sta/ not found)."
+[ -d "$here/sta" ] && [ -d "$here/packaging" ] || die "run this script from the SmartTimeArchive folder (sta/ not found)."
 
 # --- a Python 3.9+ ---------------------------------------------------------------------
 py=""
@@ -74,67 +74,23 @@ $SUDO "$lib/venv/bin/python" -m pip install --quiet --disable-pip-version-check 
 version_app="$(PYTHONPATH="$lib" "$lib/venv/bin/python" -c 'import sta; print(sta.__version__)')"
 printf '%s\n' "$version_app" | $SUDO tee "$marker" >/dev/null
 
-# --- the terminal window launcher ------------------------------------------------------
-$SUDO tee "$lib/launch.command" >/dev/null <<LAUNCH
-#!/bin/bash
-# Opened by SmartTimeArchive.app inside Terminal. Sets the recommended window size first.
-printf '\\e[8;42;120t'
-clear
-"$bin"
-status=\$?
-echo
-echo "SmartTimeArchive closed. You can close this window."
-exit \$status
-LAUNCH
+# --- the command, the terminal launcher and the app (same templates the .pkg uses) ----------
+render() { sed -e "s|@LIB@|$lib|g" -e "s|@BIN@|$bin|g" -e "s|@VERSION@|$version_app|g" "$1"; }
+pk="$here/packaging"
+
+render "$pk/launch.command.in" | $SUDO tee "$lib/launch.command" >/dev/null
 $SUDO chmod 755 "$lib/launch.command"
 
-# --- the sta command -------------------------------------------------------------------
 $SUDO mkdir -p "$prefix/bin"
-$SUDO tee "$bin" >/dev/null <<CMD
-#!/bin/bash
-# sta            -> terminal UI          sta --tmux  -> the same, inside tmux (survives a closed window)
-# sta plan|extract|verify|list ...  -> the engine commands (see: sta --help)
-home="$lib"
-if [ "\${1:-}" = "--tmux" ]; then
-  shift
-  if [ -n "\${TMUX:-}" ]; then
-    :  # already inside tmux
-  elif command -v tmux >/dev/null 2>&1; then
-    exec tmux new-session -A -s smarttimearchive "\$0" "\$@"
-  else
-    echo "tmux is not installed: running without it." >&2
-  fi
-fi
-export PYTHONPATH="\$home"
-exec "\$home/venv/bin/python" -m sta "\$@"
-CMD
+render "$pk/sta.in" | $SUDO tee "$bin" >/dev/null
 $SUDO chmod 755 "$bin"
 
-# --- the app ---------------------------------------------------------------------------
 say "Creating $app ..."
 $SUDO rm -rf "$app"
 $SUDO mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 [ -f "$here/app_icon.icns" ] && $SUDO cp "$here/app_icon.icns" "$app/Contents/Resources/app_icon.icns"
-$SUDO tee "$app/Contents/Info.plist" >/dev/null <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>SmartTimeArchive</string>
-  <key>CFBundleDisplayName</key><string>SmartTimeArchive</string>
-  <key>CFBundleIdentifier</key><string>com.juniorbarchini.smarttimearchive</string>
-  <key>CFBundleExecutable</key><string>SmartTimeArchive</string>
-  <key>CFBundleIconFile</key><string>app_icon</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>$version_app</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
-</dict>
-</plist>
-PLIST
-$SUDO tee "$app/Contents/MacOS/SmartTimeArchive" >/dev/null <<APP
-#!/bin/bash
-exec open -a Terminal "$lib/launch.command"
-APP
+render "$pk/Info.plist.in" | $SUDO tee "$app/Contents/Info.plist" >/dev/null
+render "$pk/app-exec.in" | $SUDO tee "$app/Contents/MacOS/SmartTimeArchive" >/dev/null
 $SUDO chmod 755 "$app/Contents/MacOS/SmartTimeArchive"
 $SUDO touch "$app"
 

@@ -27,6 +27,13 @@ already; this keeps the history safe when the disk can no longer hold it.
 
 ## Install
 
+**With the installer (`.pkg`)** — download `SmartTimeArchive-<version>.pkg` from the
+[Releases](https://github.com/juniorbarchini-oss/smarttimearchive-app/releases) page and double-click
+it. It carries its own Python, so nothing else has to be installed (macOS 11 or newer, Intel or Apple
+silicon). The package is **not signed by Apple** (that costs a paid developer account), so macOS shows a
+warning the first time: open *System Settings > Privacy & Security*, scroll down and press
+*Open Anyway*, then confirm. It is a one-time step; installing from the source (below) avoids it.
+
 **From the source** (no security warning from macOS: nothing is downloaded through a browser):
 
 ```bash
@@ -180,6 +187,8 @@ The v1 desktop app (PySide6) was retired: it could delete the source after a mig
 errors and reported success after a cancel. It remains in the git history only.
 
 ## Development
+
+Build the `.pkg` yourself (needs internet the first time): `packaging/build_pkg.sh` -> `dist/`.
 
 ```bash
 python3 -m venv venv && venv/bin/pip install -r requirements.txt

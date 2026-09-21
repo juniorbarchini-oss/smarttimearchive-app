@@ -1,0 +1,7 @@
+#!/bin/bash
+# An upgrade replaces the previous install (only when it is ours: it carries the marker file).
+lib=/usr/local/lib/smarttimearchive
+if [ -e "$lib/.smarttimearchive" ]; then
+  rm -rf "$lib" /Applications/SmartTimeArchive.app /usr/local/bin/sta
+fi
+exit 0

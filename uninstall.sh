@@ -10,6 +10,8 @@ SUDO="sudo"
 [ -e "$lib/.smarttimearchive" ] || { echo "SmartTimeArchive is not installed in $lib."; exit 1; }
 [ -z "$SUDO" ] || sudo -v
 $SUDO rm -rf "$apps/SmartTimeArchive.app" "$prefix/bin/sta" "$lib"
+# installed from the .pkg: forget its receipt too (harmless when there is none)
+if [ -n "$SUDO" ]; then $SUDO pkgutil --forget com.juniorbarchini.smarttimearchive >/dev/null 2>&1 || true; fi
 echo "SmartTimeArchive was removed."
 
 cache="$HOME/Library/Caches/sta"

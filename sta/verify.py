@@ -6,7 +6,7 @@ import os
 import time
 
 from .apfs import ApfsError
-from .core import REPORT_DIR, parse_manifest_line
+from .core import REPORT_DIR, parse_manifest_line, safe_rel
 from .image import ImageMount
 
 VERIFIED = "VERIFIED"
@@ -62,6 +62,9 @@ def _verify_tree(root, emit, cancel):
                 rep["status"] = CANCELLED
                 return rep
             done += 1
+            if not safe_rel(rel):  # the manifest is a user-editable file and this may run as root
+                rep["missing"].append((date, rel))
+                continue
             if done % 2000 == 0:
                 emit({"event": "verify_progress", "done": done, "total": total,
                       "seconds": round(time.time() - t0, 1)})  # fmt: skip

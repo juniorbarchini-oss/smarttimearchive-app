@@ -487,6 +487,17 @@ def _sha256(path):
     return h.hexdigest()
 
 
+def safe_rel(rel):
+    """True for a plain relative path inside the archive. The scan data lives in a file the user can
+    edit while the engine runs as administrator, so a path is never trusted to stay inside."""
+    return (
+        bool(rel)
+        and "\0" not in rel
+        and not os.path.isabs(rel)
+        and ".." not in rel.split("/")
+    )
+
+
 class DestinationFull(Exception):
     pass
 
@@ -578,6 +589,9 @@ class Extractor:
                 if self.cancel():
                     self.log(f"{date}: cancelled, leaving {os.path.basename(part)}")
                     return
+                if not safe_rel(rel):
+                    stats["errors"].append((rel, 0, "unsafe path in the scan data: skipped"))
+                    continue
                 src, dst = os.path.join(data_root, rel), os.path.join(part, rel)
                 if self.case_insensitive:
                     low = rel.lower()
