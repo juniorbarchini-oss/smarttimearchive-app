@@ -195,6 +195,11 @@ python3 -m venv venv && venv/bin/pip install -r requirements.txt
 ./smarttimearchive          # runs the UI from this folder (no install needed)
 ```
 
+## License
+
+[MIT](LICENSE). It comes with no warranty: this tool reads backup disks and runs as administrator,
+so try it first on a backup you can afford to lose and check the result with the built-in verification.
+
 ## Credits
 
 Created by **Humberto Barchini**, built together with **Claude** (Anthropic's AI model) using Claude Code:
