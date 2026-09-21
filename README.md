@@ -122,6 +122,24 @@ many small files are much slower than a few big ones (a real 184 GB / 2.4 M-entr
 Exit codes (`extract` and `verify`): `0` ok, `3` ok with warnings (unreadable files), `130` cancelled, `1` failed.
 Ctrl+C cancels cleanly and never reports success.
 
+## Security model
+
+The engine has to run as administrator (to mount snapshots and read every user's files), so:
+
+- Its code and Python live in `/usr/local/lib/smarttimearchive`, owned by root; the installers check it.
+- Everything the engine does inside folders **you** control, such as the scan cache
+  (`~/Library/Caches/sta`), it does **with your own rights** (dropped from root), so a symlink planted
+  there cannot make root overwrite a file you have no right to. The cache is copied to a private
+  folder before it is read.
+- Paths coming from the scan cache or the manifests are never trusted: anything that would leave the
+  archive (`..`, absolute) is refused and reported.
+- The administrator password is typed in the UI, handed to `sudo` through stdin and dropped.
+- Known limit: the **destination folder you choose is written as administrator** (the copy must keep
+  the original owners), so pick a folder you control. Run from a source checkout (`./smarttimearchive`)
+  the engine runs code from that folder: for daily use, install it.
+
+Found something? Please open an issue, or write to the address on the Support link.
+
 ## Safety rules
 
 - The backup is mounted **read-only** and is never modified. Nothing is ever deleted from it.

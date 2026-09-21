@@ -404,3 +404,94 @@ class TestUnsafePaths(Fixture):
         self.assertEqual(status, core.COMPLETED_WITH_ERRORS)
         errs = [e for e in ext.report["dates"][date]["errors"] if "unsafe path" in e[2]]
         self.assertEqual(len(errs), 2)
+
+
+class TestCacheAsTheUser(Fixture):
+    """The engine runs as root but must touch the user's cache folder with the user's own rights."""
+
+    def test_as_invoking_user_is_a_noop_without_root_and_sudo(self):
+        from unittest import mock
+
+        from sta import util
+
+        with mock.patch.object(util.os, "seteuid") as seteuid, mock.patch.object(
+            util.os, "setegid"
+        ) as setegid:
+            with util.as_invoking_user():
+                pass
+            with mock.patch.dict(os.environ, {"SUDO_UID": "501", "SUDO_GID": "20"}):
+                with util.as_invoking_user():  # not root: still nothing to do
+                    pass
+        self.assertFalse(seteuid.called or setegid.called)
+
+    def test_as_invoking_user_drops_then_restores_in_a_safe_order(self):
+        from unittest import mock
+
+        from sta import util
+
+        calls = []
+        with mock.patch.dict(os.environ, {"SUDO_UID": "501", "SUDO_GID": "20"}), \
+                mock.patch.object(util.os, "geteuid", return_value=0), \
+                mock.patch.object(util.os, "getgroups", return_value=[0, 80]), \
+                mock.patch.object(util.os, "setgroups", side_effect=lambda g: calls.append(("groups", g))), \
+                mock.patch.object(util.os, "setegid", side_effect=lambda g: calls.append(("egid", g))), \
+                mock.patch.object(util.os, "seteuid", side_effect=lambda u: calls.append(("euid", u))):  # fmt: skip
+            with util.as_invoking_user():
+                calls.append("inside")
+            self.assertEqual(
+                calls,
+                [("groups", [20]), ("egid", 20), ("euid", 501), "inside",
+                 ("euid", 0), ("egid", 0), ("groups", [0, 80])],
+            )  # fmt: skip
+
+    def test_restores_root_even_when_the_work_inside_fails(self):
+        from unittest import mock
+
+        from sta import util
+
+        calls = []
+        with mock.patch.dict(os.environ, {"SUDO_UID": "501", "SUDO_GID": "20"}), \
+                mock.patch.object(util.os, "geteuid", return_value=0), \
+                mock.patch.object(util.os, "getgroups", return_value=[0]), \
+                mock.patch.object(util.os, "setgroups"), mock.patch.object(util.os, "setegid"), \
+                mock.patch.object(util.os, "seteuid", side_effect=lambda u: calls.append(u)):  # fmt: skip
+            with self.assertRaises(RuntimeError):
+                with util.as_invoking_user():
+                    raise RuntimeError("boom")
+        self.assertEqual(calls, [501, 0])
+
+    def test_cache_round_trip_leaves_no_private_copies_or_tmp_files_behind(self):
+        import glob
+
+        cdir = os.path.join(self.tmp, "cache")
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), "sta_*")))
+        for _ in range(2):  # first scans and publishes, second loads from the published file
+            conn, _e = core.scan(self.source, self.dates, core.Options(),
+                                 os.path.join(self.tmp, "w.db"), log=lambda *_: None,
+                                 cdir=cdir)  # fmt: skip
+            self.assertEqual(
+                conn.execute("SELECT COUNT(DISTINCT snap) FROM files").fetchone()[0], 3
+            )
+            conn.close()
+            os.unlink(os.path.join(self.tmp, "w.db"))
+        names = sorted(os.listdir(cdir))
+        self.assertEqual(len(names), 3)
+        self.assertTrue(all(n.endswith(".db") for n in names), names)
+        after = set(glob.glob(os.path.join(tempfile.gettempdir(), "sta_*")))
+        self.assertEqual(after - before, set(), "private scratch folders must be cleaned up")
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores folder permissions")
+    def test_a_cache_folder_that_cannot_be_written_only_costs_the_cache(self):
+        cdir = os.path.join(self.tmp, "ro")
+        os.makedirs(cdir)
+        os.chmod(cdir, 0o500)
+        try:
+            conn, _e = core.scan(self.source, self.dates, core.Options(),
+                                 os.path.join(self.tmp, "w2.db"), log=lambda *_: None,
+                                 cdir=cdir)  # fmt: skip
+            self.assertEqual(
+                conn.execute("SELECT COUNT(DISTINCT snap) FROM files").fetchone()[0], 3
+            )
+            conn.close()
+        finally:
+            os.chmod(cdir, 0o700)
