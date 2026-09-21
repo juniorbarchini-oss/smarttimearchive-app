@@ -34,6 +34,18 @@ silicon). The package is **not signed by Apple** (that costs a paid developer ac
 warning the first time: open *System Settings > Privacy & Security*, scroll down and press
 *Open Anyway*, then confirm. It is a one-time step; installing from the source (below) avoids it.
 
+**With Homebrew** — installs the same `.pkg` (checked against its SHA-256) from the project's own
+[tap](https://github.com/juniorbarchini-oss/homebrew-tap):
+
+```bash
+brew tap juniorbarchini-oss/tap
+brew install --cask smarttimearchive
+```
+
+Homebrew asks for your password because the installer needs it. Update with
+`brew upgrade --cask smarttimearchive`; remove with `brew uninstall --cask smarttimearchive` (add
+`--zap` to also delete the scan cache).
+
 **From the source** (no security warning from macOS: nothing is downloaded through a browser):
 
 ```bash
